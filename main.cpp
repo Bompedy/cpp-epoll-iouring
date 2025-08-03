@@ -4,6 +4,7 @@
 #include <bits/ostream.tcc>
 #include <fcntl.h>
 #include <thread>
+#include <unordered_map>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -28,9 +29,28 @@ uint64_t pack_fd_and_index(const int fd, const uint32_t index) {
     return (static_cast<uint64_t>(fd) << 32) | index;
 }
 
-void unpack_fd_and_index(uint64_t data, int &fd, uint32_t &index) {
+void unpack_fd_and_index(const uint64_t data, int &fd, uint32_t &index) {
     fd = static_cast<int>(data >> 32);
     index = static_cast<uint32_t>(data & 0xFFFFFFFF);
+}
+
+std::unordered_map<std::string, std::string> parse_flags(int argc, char* argv[]) {
+    std::unordered_map<std::string, std::string> flags;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::string arg = argv[i]; arg.rfind("--", 0) == 0) {
+            const auto eq_pos = arg.find('=');
+            if (eq_pos != std::string::npos) {
+                const auto key = arg.substr(2, eq_pos - 2);
+                const auto value = arg.substr(eq_pos + 1);
+                flags[key] = value;
+            } else {
+                std::cerr << "Invalid flag format: " << arg << std::endl;
+            }
+        }
+    }
+
+    return flags;
 }
 
 void epoll_test(
@@ -209,19 +229,29 @@ void epoll_test(
     }
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 8) {
-        std::cerr << "Usage: " << argv[0] << "<is_client> <clients_per_thread> <threads> <data_size> <max_events> <host> <base_port>\n";
+int main(int argc, char *argv[]) {
+    auto flags = parse_flags(argc, argv);
+
+    if (!flags.contains("clients") || !flags.contains("threads") || !flags.contains("data") ||
+        !flags.contains("events") || !flags.contains("host") || !flags.contains("port") || !flags.contains("client")) {
+        std::cerr << "Usage:\n"
+                << "  --client=0|1\n"
+                << "  --clients=N\n"
+                << "  --threads=N\n"
+                << "  --data=N\n"
+                << "  --events=N\n"
+                << "  --host=IP_ADDRESS\n"
+                << "  --port=BASE_PORT\n";
         return 1;
     }
 
-    const auto is_client = std::stoi(argv[1]) != 0;
-    const auto clients_per_thread = std::stoi(argv[2]);
-    const auto threads = std::stoi(argv[3]);
-    const auto data_size = std::stoi(argv[4]);
-    const auto max_events = std::stoi(argv[5]);
-    const std::string ip_address = argv[6];
-    const auto base_port = std::stoi(argv[7]);
+    const bool is_client = flags["client"] == "1";
+    const int clients_per_thread = std::stoi(flags["clients"]);
+    const int threads = std::stoi(flags["threads"]);
+    const int data_size = std::stoi(flags["data"]);
+    const int max_events = std::stoi(flags["events"]);
+    const std::string ip_address = flags["host"];
+    const int base_port = std::stoi(flags["port"]);
     std::signal(SIGINT, [](int) { active.store(false); });
 
 
