@@ -1,3 +1,4 @@
+#include <csignal>
 #include <cstring>
 #include <iostream>
 #include <bits/ostream.tcc>
@@ -23,7 +24,7 @@ struct Connection {
     bool server_side_conn;
 };
 
-uint64_t pack_fd_and_index(int fd, uint32_t index) {
+uint64_t pack_fd_and_index(const int fd, const uint32_t index) {
     return (static_cast<uint64_t>(fd) << 32) | index;
 }
 
@@ -32,9 +33,17 @@ void unpack_fd_and_index(uint64_t data, int &fd, uint32_t &index) {
     index = static_cast<uint32_t>(data & 0xFFFFFFFF);
 }
 
-void epoll_test(const int clients_per_thread, const int threads, const int data_size, const int max_events, const std::string& ip_address, const int base_port) {
+void epoll_test(
+    const bool is_client,
+    const int clients_per_thread,
+    const int threads,
+    const int data_size,
+    const int max_events,
+    const std::string& ip_address,
+    const int base_port
+) {
     for (int i = 0; i < threads; i++) {
-        std::thread([i, clients_per_thread, max_events, data_size, base_port, ip_address]() {
+        std::thread([i, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
             auto connection_index = 0;
             std::vector<Connection> connections;
             connections.resize(clients_per_thread + 100);
@@ -50,51 +59,58 @@ void epoll_test(const int clients_per_thread, const int threads, const int data_
             const auto epoll_fd = epoll_create1(0);
             epoll_event epoll_events[max_events];
 
-            const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
-            std::cout << "server_fd: " << server_fd << std::endl;
-            fcntl(server_fd, F_SETFL, O_NONBLOCK);
-            constexpr int opt = 1;
-            setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-            sockaddr_in addr{};
-            addr.sin_family = AF_INET;
-            inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
-            addr.sin_port = htons(base_port + i);
+            int server_fd = 0;
 
-            if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-                perror("bind");
-                return;
-            }
-            if (listen(server_fd, SOMAXCONN) < 0) {
-                perror("listen");
-                return;
-            }
+            if (!is_client) {
+                server_fd = socket(AF_INET, SOCK_STREAM, 0);
+                std::cout << "server_fd: " << server_fd << std::endl;
+                fcntl(server_fd, F_SETFL, O_NONBLOCK);
+                constexpr int opt = 1;
+                setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
+                addr.sin_port = htons(base_port + i);
 
-            epoll_event server_event{};
-            server_event.events = EPOLLIN | EPOLLET;
-            server_event.data.u64 = pack_fd_and_index(server_fd, 0);
-            epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
-            std::cout << "Thread " << i << " listening on port " << (base_port + i) << std::endl;
-
-            for (int c = 0; c < clients_per_thread; c++) {
-                const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
-                fcntl(client_fd, F_SETFL, O_NONBLOCK);
-                sockaddr_in server_addr{};
-                server_addr.sin_family = AF_INET;
-                server_addr.sin_port = htons(base_port + i);
-                inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
-
-                const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
-                if (result == -1 && errno != EINPROGRESS && errno != EALREADY) {
-                    perror("connect");
-                    close(client_fd);
-                    continue;
+                if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+                    perror("bind");
+                    return;
+                }
+                if (listen(server_fd, SOMAXCONN) < 0) {
+                    perror("listen");
+                    return;
                 }
 
-                epoll_event client_event{};
-                client_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
-                client_event.data.u64 = pack_fd_and_index(client_fd, connection_index++);
-                std::cout << "My connection_index and fd: " << connection_index << " : " << client_fd << std::endl;
-                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
+                epoll_event server_event{};
+                server_event.events = EPOLLIN | EPOLLET;
+                server_event.data.u64 = pack_fd_and_index(server_fd, 0);
+                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
+                std::cout << "Thread " << i << " listening on port " << (base_port + i) << std::endl;
+            }
+
+            if (is_client) {
+                for (int c = 0; c < clients_per_thread; c++) {
+                    const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
+                    fcntl(client_fd, F_SETFL, O_NONBLOCK);
+                    sockaddr_in server_addr{};
+                    server_addr.sin_family = AF_INET;
+                    server_addr.sin_port = htons(base_port + i);
+                    inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
+
+                    const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr),
+                                                sizeof(server_addr));
+                    if (result == -1 && errno != EINPROGRESS && errno != EALREADY) {
+                        perror("connect");
+                        close(client_fd);
+                        continue;
+                    }
+
+                    epoll_event client_event{};
+                    client_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                    client_event.data.u64 = pack_fd_and_index(client_fd, connection_index++);
+                    std::cout << "My connection_index and fd: " << connection_index << " : " << client_fd << std::endl;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
+                }
             }
 
             while (active.load()) {
@@ -106,7 +122,7 @@ void epoll_test(const int clients_per_thread, const int threads, const int data_
                     uint32_t index;
                     unpack_fd_and_index(fd_and_index, fd, index);
 
-                    if (fd == server_fd) {
+                    if (!is_client && fd == server_fd) {
                         while (true) {
                             sockaddr_in client_addr{};
                             socklen_t addr_len = sizeof(client_addr);
@@ -157,11 +173,7 @@ void epoll_test(const int clients_per_thread, const int threads, const int data_
                                     conn.write_pos = 0;
                                     conn.should_write = true;
 
-                                    if (conn.server_side_conn) {
-                                        server_read_ops += 1;
-                                    } else {
-                                        client_read_ops += 1;
-                                    }
+                                    if (is_client) client_read_ops.fetch_add(1); else server_read_ops.fetch_add(1);
                                 }
                             }
                         }
@@ -184,12 +196,9 @@ void epoll_test(const int clients_per_thread, const int threads, const int data_
                                 if (conn.write_pos == data_size) {
                                     conn.write_pos = 0;
                                     conn.should_write = false;
-
-                                    if (conn.server_side_conn) {
-                                        server_write_ops += 1;
-                                    } else {
-                                        client_write_ops += 1;
-                                    }
+                                    if (is_client) {
+                                        client_write_ops.fetch_add(1);
+                                    } else server_write_ops.fetch_add(1);
                                 }
                             }
                         }
@@ -201,40 +210,44 @@ void epoll_test(const int clients_per_thread, const int threads, const int data_
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 7) {
-        std::cerr << "Usage: " << argv[0] << " <clients_per_thread> <threads> <data_size> <max_events> <host> <base_port>\n";
+    if (argc != 8) {
+        std::cerr << "Usage: " << argv[0] << "<is_client> <clients_per_thread> <threads> <data_size> <max_events> <host> <base_port>\n";
         return 1;
     }
 
-    const auto clients_per_thread = std::stoi(argv[1]);
-    const auto threads = std::stoi(argv[2]);
-    const auto data_size = std::stoi(argv[3]);
-    const auto max_events = std::stoi(argv[4]);
-    const std::string ip_address = argv[5];
-    const auto base_port = std::stoi(argv[6]);
+    const auto is_client = std::stoi(argv[1]) != 0;
+    const auto clients_per_thread = std::stoi(argv[2]);
+    const auto threads = std::stoi(argv[3]);
+    const auto data_size = std::stoi(argv[4]);
+    const auto max_events = std::stoi(argv[5]);
+    const std::string ip_address = argv[6];
+    const auto base_port = std::stoi(argv[7]);
+    std::signal(SIGINT, [](int) { active.store(false); });
 
 
     active.store(true);
-    epoll_test(clients_per_thread, threads, data_size, max_events, ip_address, base_port);
+    epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, base_port);
 
-    std::thread monitor_thread([]() {
-        int64_t lastClientRead = 0;
-        int64_t lastClientWrite = 0;
-        int64_t lastServerRead = 0;
-        int64_t lastServerWrite = 0;
+    std::thread monitor_thread([is_client]() {
+        auto lastClientRead = 0;
+        auto lastClientWrite = 0;
+        auto lastServerRead = 0;
+        auto lastServerWrite = 0;
 
         while (active.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
 
-            int64_t cr = client_read_ops.load();
-            int64_t cw = client_write_ops.load();
-            int64_t sr = server_read_ops.load();
-            int64_t sw = server_write_ops.load();
+            const auto cr = client_read_ops.load();
+            const auto cw = client_write_ops.load();
+            const auto sr = server_read_ops.load();
+            const auto sw = server_write_ops.load();
 
-            std::cout << "Client ops: read=" << (cr - lastClientRead)
-                    << " write=" << (cw - lastClientWrite) << std::endl;
-            std::cout << "Server ops: read=" << (sr - lastServerRead)
-                    << " write=" << (sw - lastServerWrite) << std::endl;
+            if (is_client) {
+                std::cout << "Client ops: read=" << (cr - lastClientRead) << " write=" << (cw - lastClientWrite) << std::endl;
+            } else {
+                std::cout << "Server ops: read=" << (sr - lastServerRead) << " write=" << (sw - lastServerWrite) << std::endl;
+            }
+
 
             lastClientRead = cr;
             lastClientWrite = cw;
