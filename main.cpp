@@ -3,13 +3,44 @@
 #include <iostream>
 #include <bits/ostream.tcc>
 #include <fcntl.h>
+#include <functional>
 #include <thread>
 #include <unordered_map>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <vector>
+#include "io_uring.h"
+#include <sys/mman.h>
 
+int io_uring_setup(const unsigned entries, io_uring_params *params) {
+    const int ring_fd = syscall(__NR_io_uring_setup, entries, params);
+    if (ring_fd < 0) {
+        throw std::runtime_error("io_uring_setup failed: " + std::string(std::strerror(errno)));
+    }
+    return ring_fd;
+}
+
+int io_uring_enter(
+    const int ring_fd,
+    const unsigned int to_submit,
+    const unsigned int min_complete,
+    const unsigned int flags
+) {
+    const int result = syscall(__NR_io_uring_enter, ring_fd, to_submit, min_complete, flags, nullptr, 0);
+    if (result < 0) {
+        throw std::runtime_error("io_uring_enter failed: " + std::string(std::strerror(errno)));
+    }
+    return result;
+}
+
+int io_uring_register(unsigned int ring_fd, unsigned int op, void *arg, unsigned int nr_args) {
+    const int result = syscall(__NR_io_uring_register, ring_fd, op, arg, nr_args);
+    if (result < 0) {
+        throw std::runtime_error("io_uring_register failed: " + std::string(std::strerror(errno)));
+    }
+    return result;
+}
 std::atomic_bool active{};
 std::atomic_int server_write_ops{};
 std::atomic_int server_read_ops{};
@@ -229,13 +260,109 @@ void epoll_test(
     }
 }
 
+void iouring_test(
+    const bool is_client,
+    const int clients_per_thread,
+    const int threads,
+    const int data_size,
+    const int max_events,
+    const std::string &ip_address,
+    const int base_port
+) {
+    consteval char OP_ACCEPT = 0;
+    consteval char OP_CONNECT = 1;
+    consteval char OP_WRITE = 2;
+    consteval char OP_READ = 3;
+
+    for (int threadId = 0; threadId < threads; threadId++) {
+        std::thread([threadId, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
+            try {
+                constexpr auto params = new io_uring_params();
+                params->flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
+                const auto ring_fd = io_uring_setup(1000, params);
+                const auto sq_ring_size = params->sq_off.array + params->sq_entries + sizeof(__u32);
+                const auto sq_ptr = mmap(nullptr, sq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_SQ_RING);
+                if (sq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on sq_ptr");
+                const auto sqes_size = params->sq_entries * sizeof(io_uring_sqe);
+                const auto sqes =
+                        static_cast<struct io_uring_sqe *>(
+                            mmap(nullptr, sqes_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd,
+                                 IORING_OFF_SQES)
+                        );
+                if (sqes == MAP_FAILED) throw std::runtime_error("mmap failed on sqes");
+                const auto cq_ring_size = params->cq_off.cqes + params->cq_entries * sizeof(struct io_uring_cqe);
+                const auto cq_ptr = mmap(NULL, cq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_CQ_RING);
+                if (cq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on cqes");
+
+                const auto cq_head = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(cq_ptr) + params->cq_off.head);
+                const auto cq_tail = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(cq_ptr) + params->cq_off.tail);
+                const auto cq_ring_mask = reinterpret_cast<uint32_t *>(static_cast<char *>(cq_ptr) + params->cq_off.ring_mask);
+                const auto *cqes = reinterpret_cast<struct io_uring_cqe *>(static_cast<char *>(cq_ptr) + params->cq_off.cqes);
+
+                const auto sq_head = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.head);
+                const auto sq_tail = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.tail);
+                const auto sq_ring_mask = reinterpret_cast<uint32_t*>(static_cast<char*>(sq_ptr) + params->sq_off.ring_mask);
+                const auto sq_array = reinterpret_cast<uint32_t *>(static_cast<char *>(sq_ptr) + params->sq_off.array);
+                const auto sq_flags = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(sq_ptr) + params->sq_off.flags);
+
+                auto to_submit = 0;
+
+                auto submit = [sq_head, sq_tail, sq_ring_mask, sqes, &to_submit](const std::function<void(io_uring_sqe&)> &callback) {
+                    const auto head = sq_head->load();
+                    const auto tail = sq_tail->load();
+                    const auto used = tail - head;
+                    const auto space = params->sq_entries - used;
+                    if (space <= 0) throw std::runtime_error("out of space in submission queue!");
+                    const auto index = tail & *sq_ring_mask;
+                    io_uring_sqe* entry = &sqes[index];
+                    memset(entry, 0, sizeof(*entry));
+                    callback(*entry);
+                    to_submit += 1;
+                    sq_tail->store(tail + 1, std::memory_order_seq_cst);
+                };
+
+                while (active.load()) {
+                    const auto head = cq_head->load();
+                    const auto tail = cq_tail->load();
+                    const auto to_process = (tail - head);
+                    if (to_process > 0) {
+                        for (int i = 0; i < to_process; i++) {
+                            const auto index = (head + i) & *cq_ring_mask;
+                            const auto cq = cqes[index];
+                            const auto op = cq.user_data;
+                            // if (op == OP_CONNECT) {
+                            //
+                            // }
+                        }
+
+                        cq_head->fetch_add(to_process);
+                    }
+
+                    if (to_submit > 0) {
+                        if ((sq_flags->load() & IORING_SQ_NEED_WAKEUP) != 0) {
+                            io_uring_enter(ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP);
+                        }
+                        to_submit = 0;
+                    }
+                }
+
+                close(ring_fd);
+            } catch (const std::runtime_error &e) {
+                std::cerr << "error in thread " << threadId << ": " << e.what() << std::endl;
+
+            }
+        }).detach();
+    }
+}
+
 int main(int argc, char *argv[]) {
     auto flags = parse_flags(argc, argv);
 
-    if (!flags.contains("clients") || !flags.contains("threads") || !flags.contains("data") ||
+    if (!flags.contains("type") || !flags.contains("clients") || !flags.contains("threads") || !flags.contains("data") ||
         !flags.contains("events") || !flags.contains("host") || !flags.contains("port") || !flags.contains("client")) {
         std::cerr << "Usage:\n"
-                << "  --client=0|1\n"
+                << "  --type=0(io_uring)|1(epoll)\n"
+                << "  --client=0(server)|1(client)\n"
                 << "  --clients=N\n"
                 << "  --threads=N\n"
                 << "  --data=N\n"
@@ -245,18 +372,22 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    const bool is_client = flags["client"] == "1";
-    const int clients_per_thread = std::stoi(flags["clients"]);
-    const int threads = std::stoi(flags["threads"]);
-    const int data_size = std::stoi(flags["data"]);
-    const int max_events = std::stoi(flags["events"]);
-    const std::string ip_address = flags["host"];
-    const int base_port = std::stoi(flags["port"]);
+    const auto is_epoll = flags["type"] == "1";
+    const auto is_client = flags["client"] == "1";
+    const auto clients_per_thread = std::stoi(flags["clients"]);
+    const auto threads = std::stoi(flags["threads"]);
+    const auto data_size = std::stoi(flags["data"]);
+    const auto max_events = std::stoi(flags["events"]);
+    const auto ip_address = flags["host"];
+    const auto base_port = std::stoi(flags["port"]);
     std::signal(SIGINT, [](int) { active.store(false); });
 
-
     active.store(true);
-    epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, base_port);
+    if (is_epoll) {
+        epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, base_port);
+    } else {
+        iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, base_port);
+    }
 
     std::thread monitor_thread([is_client]() {
         auto lastClientRead = 0;
