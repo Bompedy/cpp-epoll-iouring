@@ -4,6 +4,7 @@
 #include <bits/ostream.tcc>
 #include <fcntl.h>
 #include <functional>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <sys/epoll.h>
@@ -97,6 +98,18 @@ std::unordered_map<std::string, std::string> parse_flags(int argc, char* argv[])
     return flags;
 }
 
+std::vector<int> split_ports(const std::string& port_by_thread) {
+    std::vector<int> ports;
+    std::stringstream ss(port_by_thread);
+    std::string port_str;
+
+    while (std::getline(ss, port_str, ',')) {
+        ports.push_back(std::stoi(port_str));
+    }
+
+    return ports;
+}
+
 void epoll_test(
     const bool is_client,
     const int clients_per_thread,
@@ -104,10 +117,11 @@ void epoll_test(
     const int data_size,
     const int max_events,
     const std::string& ip_address,
-    const int base_port
+    const std::vector<int>& ports
 ) {
     for (int i = 0; i < threads; i++) {
-        std::thread([i, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
+        const auto port = ports[i];
+        std::thread([i, clients_per_thread, max_events, data_size, port, ip_address, is_client]() {
             auto connection_index = 0;
             std::vector<Connection> connections;
             connections.resize(clients_per_thread + 100);
@@ -134,7 +148,7 @@ void epoll_test(
                 sockaddr_in addr{};
                 addr.sin_family = AF_INET;
                 inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
-                addr.sin_port = htons(base_port + i);
+                addr.sin_port = htons(port);
 
                 if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
                     perror("bind");
@@ -149,14 +163,14 @@ void epoll_test(
                 server_event.events = EPOLLIN | EPOLLET;
                 server_event.data.u64 = pack_fd_and_index(server_fd, 0);
                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
-                std::cout << "Thread " << i << " listening on port " << (base_port + i) << std::endl;
+                std::cout << "Thread " << i << " listening on port " << (port) << std::endl;
             } else  {
                 for (int c = 0; c < clients_per_thread; c++) {
                     const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
                     fcntl(client_fd, F_SETFL, O_NONBLOCK);
                     sockaddr_in server_addr{};
                     server_addr.sin_family = AF_INET;
-                    server_addr.sin_port = htons(base_port + i);
+                    server_addr.sin_port = htons(port);
                     inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
 
                     const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
@@ -281,202 +295,202 @@ void epoll_test(
     }
 }
 
-void iouring_test(
-    const bool is_client,
-    const int clients_per_thread,
-    const int threads,
-    const int data_size,
-    const int max_events,
-    const std::string &ip_address,
-    const int base_port
-) {
-    for (int threadId = 0; threadId < threads; threadId++) {
-        std::thread([threadId, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
-            try {
-                int connection_index = 0;
-                constexpr auto params = new io_uring_params();
-                params->flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
-                const auto ring_fd = io_uring_setup(1000, params);
-                const auto sq_ring_size = params->sq_off.array + params->sq_entries + sizeof(__u32);
-                const auto sq_ptr = mmap(nullptr, sq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_SQ_RING);
-                if (sq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on sq_ptr");
-                const auto sqes_size = params->sq_entries * sizeof(io_uring_sqe);
-                const auto sqes =
-                        static_cast<struct io_uring_sqe *>(
-                            mmap(nullptr, sqes_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd,
-                                 IORING_OFF_SQES)
-                        );
-                if (sqes == MAP_FAILED) throw std::runtime_error("mmap failed on sqes");
-                const auto cq_ring_size = params->cq_off.cqes + params->cq_entries * sizeof(struct io_uring_cqe);
-                const auto cq_ptr = mmap(NULL, cq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_CQ_RING);
-                if (cq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on cqes");
-
-                const auto cq_head = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(cq_ptr) + params->cq_off.head);
-                const auto cq_tail = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(cq_ptr) + params->cq_off.tail);
-                const auto cq_ring_mask = reinterpret_cast<uint32_t *>(static_cast<char *>(cq_ptr) + params->cq_off.ring_mask);
-                const auto *cqes = reinterpret_cast<struct io_uring_cqe *>(static_cast<char *>(cq_ptr) + params->cq_off.cqes);
-
-                const auto sq_head = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.head);
-                const auto sq_tail = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.tail);
-                const auto sq_ring_mask = reinterpret_cast<uint32_t*>(static_cast<char*>(sq_ptr) + params->sq_off.ring_mask);
-                const auto sq_array = reinterpret_cast<uint32_t *>(static_cast<char *>(sq_ptr) + params->sq_off.array);
-                const auto sq_flags = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(sq_ptr) + params->sq_off.flags);
-
-                auto to_submit = 0;
-
-                auto submit = [sq_head, sq_tail, sq_ring_mask, sqes, &to_submit](const std::function<void(io_uring_sqe&)> &callback) {
-                    const auto head = sq_head->load();
-                    const auto tail = sq_tail->load();
-                    const auto used = tail - head;
-                    const auto space = params->sq_entries - used;
-                    if (space <= 0) throw std::runtime_error("out of space in submission queue!");
-                    const auto index = tail & *sq_ring_mask;
-                    io_uring_sqe* entry = &sqes[index];
-                    memset(entry, 0, sizeof(*entry));
-                    callback(*entry);
-                    to_submit += 1;
-                    sq_tail->store(tail + 1, std::memory_order_seq_cst);
-                };
-
-
-                sockaddr_in server_addr{};
-                server_addr.sin_family = AF_INET;
-                server_addr.sin_port = htons(base_port + threadId);
-                inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
-                sockaddr_in cli_in_addr{};
-                socklen_t cli_addr_len = sizeof(cli_in_addr);
-                if (!is_client) {
-                    const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
-                    std::cout << "server_fd: " << server_fd << std::endl;
-                    fcntl(server_fd, F_SETFL, O_NONBLOCK);
-                    constexpr int opt = 1;
-                    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-                    sockaddr_in addr{};
-                    addr.sin_family = AF_INET;
-                    inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
-                    addr.sin_port = htons(base_port + threadId);
-
-                    if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-                        perror("bind");
-                        return;
-                    }
-                    if (listen(server_fd, SOMAXCONN) < 0) {
-                        perror("listen");
-                        return;
-                    }
-
-                    // submit([cli_addr_len, &connection_index, &cli_in_addr](io_uring_sqe &sqe) {
-                    //     sqe.opcode = IORING_OP_ACCEPT;
-                    //     sqe.ioprio |= IORING_ACCEPT_MULTISHOT;
-                    //     sqe.fd = server_fd;
-                    //     sqe.off = &cli_addr_len;
-                    //     sqe.addr = reinterpret_cast<unsigned long>(&cli_in_addr);
-                    //     sqe.len = 0;
-                    //     sqe.user_data = pack_fd_index_opcode(server_fd, connection_index++, IORING_OP_ACCEPT);
-                    // });
-                } else {
-                    for (int c = 0; c < clients_per_thread; c++) {
-                        const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
-                        fcntl(client_fd, F_SETFL, O_NONBLOCK);
-
-                        const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
-                        if (result == -1 && errno != EINPROGRESS && errno != EALREADY) {
-                            perror("connect");
-                            close(client_fd);
-                            continue;
-                        }
-
-                        int flag = 1;
-                        if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
-                            perror("setsockopt TCP_NODELAY failed");
-                        }
-
-                        submit([server_addr, &connection_index](io_uring_sqe& sqe) {
-                            sqe.opcode = IORING_OP_CONNECT;
-                            sqe.fd = client_fd;
-                            sqe.off = sizeof(server_addr);
-                            sqe.addr = reinterpret_cast<unsigned long>(&server_addr);
-                            sqe.len = 0;
-                            sqe.user_data = pack_fd_index_opcode(client_fd, connection_index++, IORING_OP_CONNECT);
-                        });
-                    }
-                }
-
-                while (active.load()) {
-                    const auto head = cq_head->load();
-                    const auto tail = cq_tail->load();
-                    const auto to_process = (tail - head);
-                    if (to_process > 0) {
-                        for (int i = 0; i < to_process; i++) {
-                            const auto index = (head + i) & *cq_ring_mask;
-                            const auto cq = cqes[index];
-                            int fd;
-                            uint32_t conn_index;
-                            uint8_t opcode;
-                            unpack_fd_index_opcode(cq.user_data, fd, conn_index, opcode);
-                            const auto user_data = cq.user_data;
-                            const auto response = cq.res;
-                            switch (opcode) {
-                                case IORING_OP_CONNECT:
-                                    if (response < 0) {
-                                        std::cout << "Error connecting!" << std::endl;
-                                        submit([server_addr, &connection_index, user_data, fd](io_uring_sqe &sqe) {
-                                            sqe.opcode = IORING_OP_CONNECT;
-                                            sqe.fd = fd;
-                                            sqe.off = sizeof(server_addr);
-                                            sqe.addr = reinterpret_cast<unsigned long>(&server_addr);
-                                            sqe.len = 0;
-                                            sqe.user_data = user_data;
-                                        });
-                                    } else {
-                                        submit([fd, conn_index](io_uring_sqe &sqe) {
-                                            sqe.opcode = IORING_OP_READ_MULTISHOT;
-                                            sqe.fd = conn_index;
-                                            sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
-                                            sqe.buf_group = 0;
-                                            sqe.user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_READ_MULTISHOT);
-                                        });
-                                    }
-                                case IORING_OP_ACCEPT:
-                                    if (response < 0) {
-                                        throw std::runtime_error("Error accepting!");
-                                    }
-
-                                    // register new socket 
-
-                                    submit([fd, conn_index, response](io_uring_sqe &sqe) {
-                                        sqe.opcode = IORING_OP_READ_MULTISHOT;
-                                        sqe.fd = conn_index;
-                                        sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
-                                        sqe.buf_group = 0;
-                                        sqe.user_data = pack_fd_index_opcode(fd, response, IORING_OP_READ_MULTISHOT);
-                                    });
-
-                            }
-                            // if (op == OP_CONNECT) {
-                            //
-                            // }
-                        }
-
-                        cq_head->fetch_add(to_process);
-                    }
-
-                    if (to_submit > 0) {
-                        if ((sq_flags->load() & IORING_SQ_NEED_WAKEUP) != 0) {
-                            io_uring_enter(ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP);
-                        }
-                        to_submit = 0;
-                    }
-                }
-
-                close(ring_fd);
-            } catch (const std::runtime_error &e) {
-                std::cerr << "error in thread " << threadId << ": " << e.what() << std::endl;
-
-            }
-        }).detach();
-    }
-}
+// void iouring_test(
+//     const bool is_client,
+//     const int clients_per_thread,
+//     const int threads,
+//     const int data_size,
+//     const int max_events,
+//     const std::string &ip_address,
+//     const int base_port
+// ) {
+//     for (int threadId = 0; threadId < threads; threadId++) {
+//         std::thread([threadId, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
+//             try {
+//                 int connection_index = 0;
+//                 constexpr auto params = new io_uring_params();
+//                 params->flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
+//                 const auto ring_fd = io_uring_setup(1000, params);
+//                 const auto sq_ring_size = params->sq_off.array + params->sq_entries + sizeof(__u32);
+//                 const auto sq_ptr = mmap(nullptr, sq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_SQ_RING);
+//                 if (sq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on sq_ptr");
+//                 const auto sqes_size = params->sq_entries * sizeof(io_uring_sqe);
+//                 const auto sqes =
+//                         static_cast<struct io_uring_sqe *>(
+//                             mmap(nullptr, sqes_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd,
+//                                  IORING_OFF_SQES)
+//                         );
+//                 if (sqes == MAP_FAILED) throw std::runtime_error("mmap failed on sqes");
+//                 const auto cq_ring_size = params->cq_off.cqes + params->cq_entries * sizeof(struct io_uring_cqe);
+//                 const auto cq_ptr = mmap(NULL, cq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_CQ_RING);
+//                 if (cq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on cqes");
+//
+//                 const auto cq_head = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(cq_ptr) + params->cq_off.head);
+//                 const auto cq_tail = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(cq_ptr) + params->cq_off.tail);
+//                 const auto cq_ring_mask = reinterpret_cast<uint32_t *>(static_cast<char *>(cq_ptr) + params->cq_off.ring_mask);
+//                 const auto *cqes = reinterpret_cast<struct io_uring_cqe *>(static_cast<char *>(cq_ptr) + params->cq_off.cqes);
+//
+//                 const auto sq_head = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.head);
+//                 const auto sq_tail = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.tail);
+//                 const auto sq_ring_mask = reinterpret_cast<uint32_t*>(static_cast<char*>(sq_ptr) + params->sq_off.ring_mask);
+//                 const auto sq_array = reinterpret_cast<uint32_t *>(static_cast<char *>(sq_ptr) + params->sq_off.array);
+//                 const auto sq_flags = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(sq_ptr) + params->sq_off.flags);
+//
+//                 auto to_submit = 0;
+//
+//                 auto submit = [sq_head, sq_tail, sq_ring_mask, sqes, &to_submit](const std::function<void(io_uring_sqe&)> &callback) {
+//                     const auto head = sq_head->load();
+//                     const auto tail = sq_tail->load();
+//                     const auto used = tail - head;
+//                     const auto space = params->sq_entries - used;
+//                     if (space <= 0) throw std::runtime_error("out of space in submission queue!");
+//                     const auto index = tail & *sq_ring_mask;
+//                     io_uring_sqe* entry = &sqes[index];
+//                     memset(entry, 0, sizeof(*entry));
+//                     callback(*entry);
+//                     to_submit += 1;
+//                     sq_tail->store(tail + 1, std::memory_order_seq_cst);
+//                 };
+//
+//
+//                 sockaddr_in server_addr{};
+//                 server_addr.sin_family = AF_INET;
+//                 server_addr.sin_port = htons(base_port + threadId);
+//                 inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
+//                 sockaddr_in cli_in_addr{};
+//                 socklen_t cli_addr_len = sizeof(cli_in_addr);
+//                 if (!is_client) {
+//                     const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
+//                     std::cout << "server_fd: " << server_fd << std::endl;
+//                     fcntl(server_fd, F_SETFL, O_NONBLOCK);
+//                     constexpr int opt = 1;
+//                     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+//                     sockaddr_in addr{};
+//                     addr.sin_family = AF_INET;
+//                     inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
+//                     addr.sin_port = htons(base_port + threadId);
+//
+//                     if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+//                         perror("bind");
+//                         return;
+//                     }
+//                     if (listen(server_fd, SOMAXCONN) < 0) {
+//                         perror("listen");
+//                         return;
+//                     }
+//
+//                     // submit([cli_addr_len, &connection_index, &cli_in_addr](io_uring_sqe &sqe) {
+//                     //     sqe.opcode = IORING_OP_ACCEPT;
+//                     //     sqe.ioprio |= IORING_ACCEPT_MULTISHOT;
+//                     //     sqe.fd = server_fd;
+//                     //     sqe.off = &cli_addr_len;
+//                     //     sqe.addr = reinterpret_cast<unsigned long>(&cli_in_addr);
+//                     //     sqe.len = 0;
+//                     //     sqe.user_data = pack_fd_index_opcode(server_fd, connection_index++, IORING_OP_ACCEPT);
+//                     // });
+//                 } else {
+//                     for (int c = 0; c < clients_per_thread; c++) {
+//                         const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
+//                         fcntl(client_fd, F_SETFL, O_NONBLOCK);
+//
+//                         const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
+//                         if (result == -1 && errno != EINPROGRESS && errno != EALREADY) {
+//                             perror("connect");
+//                             close(client_fd);
+//                             continue;
+//                         }
+//
+//                         int flag = 1;
+//                         if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+//                             perror("setsockopt TCP_NODELAY failed");
+//                         }
+//
+//                         submit([server_addr, &connection_index](io_uring_sqe& sqe) {
+//                             sqe.opcode = IORING_OP_CONNECT;
+//                             sqe.fd = client_fd;
+//                             sqe.off = sizeof(server_addr);
+//                             sqe.addr = reinterpret_cast<unsigned long>(&server_addr);
+//                             sqe.len = 0;
+//                             sqe.user_data = pack_fd_index_opcode(client_fd, connection_index++, IORING_OP_CONNECT);
+//                         });
+//                     }
+//                 }
+//
+//                 while (active.load()) {
+//                     const auto head = cq_head->load();
+//                     const auto tail = cq_tail->load();
+//                     const auto to_process = (tail - head);
+//                     if (to_process > 0) {
+//                         for (int i = 0; i < to_process; i++) {
+//                             const auto index = (head + i) & *cq_ring_mask;
+//                             const auto cq = cqes[index];
+//                             int fd;
+//                             uint32_t conn_index;
+//                             uint8_t opcode;
+//                             unpack_fd_index_opcode(cq.user_data, fd, conn_index, opcode);
+//                             const auto user_data = cq.user_data;
+//                             const auto response = cq.res;
+//                             switch (opcode) {
+//                                 case IORING_OP_CONNECT:
+//                                     if (response < 0) {
+//                                         std::cout << "Error connecting!" << std::endl;
+//                                         submit([server_addr, &connection_index, user_data, fd](io_uring_sqe &sqe) {
+//                                             sqe.opcode = IORING_OP_CONNECT;
+//                                             sqe.fd = fd;
+//                                             sqe.off = sizeof(server_addr);
+//                                             sqe.addr = reinterpret_cast<unsigned long>(&server_addr);
+//                                             sqe.len = 0;
+//                                             sqe.user_data = user_data;
+//                                         });
+//                                     } else {
+//                                         submit([fd, conn_index](io_uring_sqe &sqe) {
+//                                             sqe.opcode = IORING_OP_READ_MULTISHOT;
+//                                             sqe.fd = conn_index;
+//                                             sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
+//                                             sqe.buf_group = 0;
+//                                             sqe.user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_READ_MULTISHOT);
+//                                         });
+//                                     }
+//                                 case IORING_OP_ACCEPT:
+//                                     if (response < 0) {
+//                                         throw std::runtime_error("Error accepting!");
+//                                     }
+//
+//                                     // register new socket
+//
+//                                     submit([fd, conn_index, response](io_uring_sqe &sqe) {
+//                                         sqe.opcode = IORING_OP_READ_MULTISHOT;
+//                                         sqe.fd = conn_index;
+//                                         sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
+//                                         sqe.buf_group = 0;
+//                                         sqe.user_data = pack_fd_index_opcode(fd, response, IORING_OP_READ_MULTISHOT);
+//                                     });
+//
+//                             }
+//                             // if (op == OP_CONNECT) {
+//                             //
+//                             // }
+//                         }
+//
+//                         cq_head->fetch_add(to_process);
+//                     }
+//
+//                     if (to_submit > 0) {
+//                         if ((sq_flags->load() & IORING_SQ_NEED_WAKEUP) != 0) {
+//                             io_uring_enter(ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP);
+//                         }
+//                         to_submit = 0;
+//                     }
+//                 }
+//
+//                 close(ring_fd);
+//             } catch (const std::runtime_error &e) {
+//                 std::cerr << "error in thread " << threadId << ": " << e.what() << std::endl;
+//
+//             }
+//         }).detach();
+//     }
+// }
 
 int main(int argc, char *argv[]) {
     auto flags = parse_flags(argc, argv);
@@ -502,15 +516,20 @@ int main(int argc, char *argv[]) {
     const auto data_size = std::stoi(flags["data"]);
     const auto max_events = std::stoi(flags["events"]);
     const auto ip_address = flags["host"];
-    const auto base_port = std::stoi(flags["port"]);
+    const auto port_by_thread = flags["ports_by_thread"];
+    const auto ports = split_ports(port_by_thread);
+
+    if (ports.size() != threads) {
+        perror("Ports size must be equal to threads!");
+    }
 
     std::signal(SIGINT, [](int) { active.store(false); });
 
     active.store(true);
     if (is_epoll) {
-        epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, base_port);
+        epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports);
     } else {
-        iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, base_port);
+        // iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports);
     }
 
     std::thread monitor_thread([is_client]() {
