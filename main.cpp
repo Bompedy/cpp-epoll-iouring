@@ -496,7 +496,7 @@ int main(int argc, char *argv[]) {
     auto flags = parse_flags(argc, argv);
 
     if (!flags.contains("type") || !flags.contains("clients") || !flags.contains("threads") || !flags.contains("data") ||
-        !flags.contains("events") || !flags.contains("host") || !flags.contains("port") || !flags.contains("client")) {
+        !flags.contains("events") || !flags.contains("host") || !flags.contains("port") || !flags.contains("client") || !flags.contains("ports")) {
         std::cerr << "Usage:\n"
                 << "  --type=0(io_uring)|1(epoll)\n"
                 << "  --client=0(server)|1(client)\n"
@@ -505,7 +505,7 @@ int main(int argc, char *argv[]) {
                 << "  --data=N\n"
                 << "  --events=N\n"
                 << "  --host=IP_ADDRESS\n"
-                << "  --port=BASE_PORT\n";
+                << "  --ports=PORTS\n";
         return 1;
     }
 
@@ -516,7 +516,7 @@ int main(int argc, char *argv[]) {
     const auto data_size = std::stoi(flags["data"]);
     const auto max_events = std::stoi(flags["events"]);
     const auto ip_address = flags["host"];
-    const auto port_by_thread = flags["ports_by_thread"];
+    const auto port_by_thread = flags["ports"];
     const auto ports = split_ports(port_by_thread);
 
     if (ports.size() != threads) {
