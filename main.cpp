@@ -522,6 +522,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Ports size: " << ports.size() << std::endl;
     if (ports.size() != threads) {
         perror("Ports size must be equal to threads!");
+        return 1;
     }
 
     std::signal(SIGINT, [](int) { active.store(false); });
