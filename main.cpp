@@ -110,6 +110,17 @@ std::vector<int> split_ports(const std::string& port_by_thread) {
     return ports;
 }
 
+void pin_thread_to_core(int core_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+
+    const auto thread = pthread_self();
+    if (pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset) != 0) {
+        perror("pthread_setaffinity_np");
+    }
+}
+
 void epoll_test(
     const bool is_client,
     const int clients_per_thread,
@@ -122,6 +133,8 @@ void epoll_test(
     for (int i = 0; i < threads; i++) {
         const auto port = ports[i];
         std::thread([i, clients_per_thread, max_events, data_size, port, ip_address, is_client]() {
+            const int core_id = i % std::thread::hardware_concurrency();
+            pin_thread_to_core(core_id);
             auto connection_index = 0;
             std::vector<Connection> connections;
             connections.resize(clients_per_thread + 100);
@@ -194,7 +207,7 @@ void epoll_test(
             }
 
             while (active.load()) {
-                const auto n = epoll_wait(epoll_fd, epoll_events, max_events, 0);
+                const auto n = epoll_wait(epoll_fd, epoll_events, max_events, -1);
                 for (int event_id = 0; event_id < n; event_id++) {
                     const auto event = epoll_events[event_id];
                     auto fd_and_index = epoll_events[event_id].data.u64;
@@ -526,6 +539,8 @@ int main(int argc, char *argv[]) {
     }
 
     std::signal(SIGINT, [](int) { active.store(false); });
+
+    std::cout << "Total cores: " << std::thread::hardware_concurrency() << std::endl;
 
     active.store(true);
     if (is_epoll) {
