@@ -207,7 +207,7 @@ void epoll_test(
             }
 
             while (active.load()) {
-                const auto n = epoll_wait(epoll_fd, epoll_events, max_events, -1);
+                const auto n = epoll_wait(epoll_fd, epoll_events, max_events, 0);
                 for (int event_id = 0; event_id < n; event_id++) {
                     const auto event = epoll_events[event_id];
                     auto fd_and_index = epoll_events[event_id].data.u64;
