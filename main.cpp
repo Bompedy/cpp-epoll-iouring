@@ -496,7 +496,7 @@ int main(int argc, char *argv[]) {
     auto flags = parse_flags(argc, argv);
 
     if (!flags.contains("type") || !flags.contains("clients") || !flags.contains("threads") || !flags.contains("data") ||
-        !flags.contains("events") || !flags.contains("host") || !flags.contains("port") || !flags.contains("client") || !flags.contains("ports")) {
+        !flags.contains("events") || !flags.contains("host") || !flags.contains("client") || !flags.contains("ports")) {
         std::cerr << "Usage:\n"
                 << "  --type=0(io_uring)|1(epoll)\n"
                 << "  --client=0(server)|1(client)\n"
