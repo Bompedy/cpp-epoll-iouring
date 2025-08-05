@@ -519,6 +519,7 @@ int main(int argc, char *argv[]) {
     const auto port_by_thread = flags["ports"];
     const auto ports = split_ports(port_by_thread);
 
+    std::cout << "Ports size: " << ports.size() << std::endl;
     if (ports.size() != threads) {
         perror("Ports size must be equal to threads!");
     }
