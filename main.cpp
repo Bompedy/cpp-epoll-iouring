@@ -131,7 +131,7 @@ void epoll_test(
     const std::vector<int>& ports
 ) {
     for (int i = 0; i < threads; i++) {
-        const auto port = ports[i];
+        const auto port = ports[i % ports.size()];
         std::thread([i, clients_per_thread, max_events, data_size, port, ip_address, is_client]() {
             const int core_id = i % std::thread::hardware_concurrency();
             pin_thread_to_core(core_id);
@@ -532,11 +532,12 @@ int main(int argc, char *argv[]) {
     const auto port_by_thread = flags["ports"];
     const auto ports = split_ports(port_by_thread);
 
+
     std::cout << "Ports size: " << ports.size() << std::endl;
-    if (ports.size() != threads) {
-        perror("Ports size must be equal to threads!");
-        return 1;
-    }
+    // if (ports.size() != threads) {
+    //     perror("Ports size must be equal to threads!");
+    //     return 1;
+    // }
 
     std::signal(SIGINT, [](int) { active.store(false); });
 
