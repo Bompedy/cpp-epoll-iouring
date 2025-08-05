@@ -12,6 +12,7 @@
 #include <vector>
 #include "io_uring.h"
 #include <sys/mman.h>
+#include <netinet/tcp.h>
 
 int io_uring_setup(const unsigned entries, io_uring_params *params) {
     const int ring_fd = syscall(__NR_io_uring_setup, entries, params);
@@ -55,6 +56,18 @@ struct Connection {
     bool should_write;
     bool server_side_conn;
 };
+
+uint64_t pack_fd_index_opcode(int fd, uint32_t index, uint8_t opcode) {
+    return (static_cast<uint64_t>(fd) << 32) |
+           ((static_cast<uint64_t>(index) & 0xFFFFFF) << 8) |
+           (opcode & 0xFF);
+}
+
+void unpack_fd_index_opcode(uint64_t data, int &fd, uint32_t &index, uint8_t &opcode) {
+    fd = static_cast<int>(data >> 32);
+    index = static_cast<uint32_t>((data >> 8) & 0xFFFFFF);
+    opcode = static_cast<uint8_t>(data & 0xFF);
+}
 
 uint64_t pack_fd_and_index(const int fd, const uint32_t index) {
     return (static_cast<uint64_t>(fd) << 32) | index;
@@ -137,9 +150,7 @@ void epoll_test(
                 server_event.data.u64 = pack_fd_and_index(server_fd, 0);
                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
                 std::cout << "Thread " << i << " listening on port " << (base_port + i) << std::endl;
-            }
-
-            if (is_client) {
+            } else  {
                 for (int c = 0; c < clients_per_thread; c++) {
                     const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
                     fcntl(client_fd, F_SETFL, O_NONBLOCK);
@@ -148,12 +159,16 @@ void epoll_test(
                     server_addr.sin_port = htons(base_port + i);
                     inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
 
-                    const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr),
-                                                sizeof(server_addr));
+                    const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
                     if (result == -1 && errno != EINPROGRESS && errno != EALREADY) {
                         perror("connect");
                         close(client_fd);
                         continue;
+                    }
+
+                    int flag = 1;
+                    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                        perror("setsockopt TCP_NODELAY failed");
                     }
 
                     epoll_event client_event{};
@@ -187,6 +202,12 @@ void epoll_test(
                             }
 
                             fcntl(client_fd, F_SETFL, O_NONBLOCK);
+
+                            int flag = 1;
+                            if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                                perror("setsockopt TCP_NODELAY failed");
+                            }
+
 
                             epoll_event client_event{};
                             client_event.events = EPOLLIN | EPOLLET | EPOLLOUT;
@@ -269,14 +290,10 @@ void iouring_test(
     const std::string &ip_address,
     const int base_port
 ) {
-    consteval char OP_ACCEPT = 0;
-    consteval char OP_CONNECT = 1;
-    consteval char OP_WRITE = 2;
-    consteval char OP_READ = 3;
-
     for (int threadId = 0; threadId < threads; threadId++) {
         std::thread([threadId, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
             try {
+                int connection_index = 0;
                 constexpr auto params = new io_uring_params();
                 params->flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
                 const auto ring_fd = io_uring_setup(1000, params);
@@ -321,6 +338,70 @@ void iouring_test(
                     sq_tail->store(tail + 1, std::memory_order_seq_cst);
                 };
 
+
+                sockaddr_in server_addr{};
+                server_addr.sin_family = AF_INET;
+                server_addr.sin_port = htons(base_port + threadId);
+                inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
+                sockaddr_in cli_in_addr{};
+                socklen_t cli_addr_len = sizeof(cli_in_addr);
+                if (!is_client) {
+                    const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
+                    std::cout << "server_fd: " << server_fd << std::endl;
+                    fcntl(server_fd, F_SETFL, O_NONBLOCK);
+                    constexpr int opt = 1;
+                    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                    sockaddr_in addr{};
+                    addr.sin_family = AF_INET;
+                    inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
+                    addr.sin_port = htons(base_port + threadId);
+
+                    if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+                        perror("bind");
+                        return;
+                    }
+                    if (listen(server_fd, SOMAXCONN) < 0) {
+                        perror("listen");
+                        return;
+                    }
+
+                    // submit([cli_addr_len, &connection_index, &cli_in_addr](io_uring_sqe &sqe) {
+                    //     sqe.opcode = IORING_OP_ACCEPT;
+                    //     sqe.ioprio |= IORING_ACCEPT_MULTISHOT;
+                    //     sqe.fd = server_fd;
+                    //     sqe.off = &cli_addr_len;
+                    //     sqe.addr = reinterpret_cast<unsigned long>(&cli_in_addr);
+                    //     sqe.len = 0;
+                    //     sqe.user_data = pack_fd_index_opcode(server_fd, connection_index++, IORING_OP_ACCEPT);
+                    // });
+                } else {
+                    for (int c = 0; c < clients_per_thread; c++) {
+                        const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
+                        fcntl(client_fd, F_SETFL, O_NONBLOCK);
+
+                        const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
+                        if (result == -1 && errno != EINPROGRESS && errno != EALREADY) {
+                            perror("connect");
+                            close(client_fd);
+                            continue;
+                        }
+
+                        int flag = 1;
+                        if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                            perror("setsockopt TCP_NODELAY failed");
+                        }
+
+                        submit([server_addr, &connection_index](io_uring_sqe& sqe) {
+                            sqe.opcode = IORING_OP_CONNECT;
+                            sqe.fd = client_fd;
+                            sqe.off = sizeof(server_addr);
+                            sqe.addr = reinterpret_cast<unsigned long>(&server_addr);
+                            sqe.len = 0;
+                            sqe.user_data = pack_fd_index_opcode(client_fd, connection_index++, IORING_OP_CONNECT);
+                        });
+                    }
+                }
+
                 while (active.load()) {
                     const auto head = cq_head->load();
                     const auto tail = cq_tail->load();
@@ -329,7 +410,49 @@ void iouring_test(
                         for (int i = 0; i < to_process; i++) {
                             const auto index = (head + i) & *cq_ring_mask;
                             const auto cq = cqes[index];
-                            const auto op = cq.user_data;
+                            int fd;
+                            uint32_t conn_index;
+                            uint8_t opcode;
+                            unpack_fd_index_opcode(cq.user_data, fd, conn_index, opcode);
+                            const auto user_data = cq.user_data;
+                            const auto response = cq.res;
+                            switch (opcode) {
+                                case IORING_OP_CONNECT:
+                                    if (response < 0) {
+                                        std::cout << "Error connecting!" << std::endl;
+                                        submit([server_addr, &connection_index, user_data, fd](io_uring_sqe &sqe) {
+                                            sqe.opcode = IORING_OP_CONNECT;
+                                            sqe.fd = fd;
+                                            sqe.off = sizeof(server_addr);
+                                            sqe.addr = reinterpret_cast<unsigned long>(&server_addr);
+                                            sqe.len = 0;
+                                            sqe.user_data = user_data;
+                                        });
+                                    } else {
+                                        submit([fd, conn_index](io_uring_sqe &sqe) {
+                                            sqe.opcode = IORING_OP_READ_MULTISHOT;
+                                            sqe.fd = conn_index;
+                                            sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
+                                            sqe.buf_group = 0;
+                                            sqe.user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_READ_MULTISHOT);
+                                        });
+                                    }
+                                case IORING_OP_ACCEPT:
+                                    if (response < 0) {
+                                        throw std::runtime_error("Error accepting!");
+                                    }
+
+                                    // register new socket 
+
+                                    submit([fd, conn_index, response](io_uring_sqe &sqe) {
+                                        sqe.opcode = IORING_OP_READ_MULTISHOT;
+                                        sqe.fd = conn_index;
+                                        sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
+                                        sqe.buf_group = 0;
+                                        sqe.user_data = pack_fd_index_opcode(fd, response, IORING_OP_READ_MULTISHOT);
+                                    });
+
+                            }
                             // if (op == OP_CONNECT) {
                             //
                             // }
@@ -380,6 +503,7 @@ int main(int argc, char *argv[]) {
     const auto max_events = std::stoi(flags["events"]);
     const auto ip_address = flags["host"];
     const auto base_port = std::stoi(flags["port"]);
+
     std::signal(SIGINT, [](int) { active.store(false); });
 
     active.store(true);
