@@ -128,10 +128,11 @@ void epoll_test(
     const int data_size,
     const int max_events,
     const std::string& ip_address,
-    const std::vector<int>& ports
+    const std::vector<int>& ports,
+    const bool ports_count_up
 ) {
     for (int i = 0; i < threads; i++) {
-        const auto port = ports[i % ports.size()];
+        const auto port = ports_count_up ? (ports[0] + i) : ports[i % ports.size()];
         std::thread([i, clients_per_thread, max_events, data_size, port, ip_address, is_client]() {
             const int core_id = i % std::thread::hardware_concurrency();
             pin_thread_to_core(core_id);
@@ -509,7 +510,7 @@ int main(int argc, char *argv[]) {
     auto flags = parse_flags(argc, argv);
 
     if (!flags.contains("type") || !flags.contains("clients") || !flags.contains("threads") || !flags.contains("data") ||
-        !flags.contains("events") || !flags.contains("host") || !flags.contains("client") || !flags.contains("ports")) {
+        !flags.contains("events") || !flags.contains("host") || !flags.contains("client") || !flags.contains("ports") || !flags.contains("ports_count_up")) {
         std::cerr << "Usage:\n"
                 << "  --type=0(io_uring)|1(epoll)\n"
                 << "  --client=0(server)|1(client)\n"
@@ -518,7 +519,8 @@ int main(int argc, char *argv[]) {
                 << "  --data=N\n"
                 << "  --events=N\n"
                 << "  --host=IP_ADDRESS\n"
-                << "  --ports=PORTS\n";
+                << "  --ports=PORTS\n"
+                << "  --ports_count_up=0(no)|1(yes)\n";
         return 1;
     }
 
@@ -530,7 +532,13 @@ int main(int argc, char *argv[]) {
     const auto max_events = std::stoi(flags["events"]);
     const auto ip_address = flags["host"];
     const auto port_by_thread = flags["ports"];
+    const auto port_count_up = flags["ports_count_up"] == "1";
     const auto ports = split_ports(port_by_thread);
+
+    if (ports.size() < 1) {
+        perror("Must have at least 1 port!");
+        return 1;
+    }
 
 
     std::cout << "Ports size: " << ports.size() << std::endl;
@@ -545,7 +553,7 @@ int main(int argc, char *argv[]) {
 
     active.store(true);
     if (is_epoll) {
-        epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports);
+        epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports, port_count_up);
     } else {
         // iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports);
     }
