@@ -43,6 +43,48 @@ int io_uring_register(unsigned int ring_fd, unsigned int op, void *arg, unsigned
     }
     return result;
 }
+
+
+bool tune_socket(const int fd, const int buffer_size = 4 * 1024 * 1024, const bool quick_ack = true, const bool no_delay = true) {
+    // Set non-blocking
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
+        perror("fcntl O_NONBLOCK failed");
+        return false;
+    }
+
+    // Set send buffer size
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+        perror("setsockopt SO_SNDBUF failed");
+        return false;
+    }
+
+    // Set receive buffer size
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+        perror("setsockopt SO_RCVBUF failed");
+        return false;
+    }
+
+    // Set TCP_NODELAY (disable Nagle's)
+    if (no_delay) {
+        const int flag = 1;
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+            perror("setsockopt TCP_NODELAY failed");
+            return false;
+        }
+    }
+
+    // Set TCP_QUICKACK (disable delayed ACKs)
+    if (quick_ack) {
+        const int flag = 1;
+        if (setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &flag, sizeof(flag)) < 0) {
+            perror("setsockopt TCP_QUICKACK failed");
+            return false;
+        }
+    }
+
+    return true;
+}
+
 std::atomic_bool active{};
 std::atomic_int server_write_ops{};
 std::atomic_int server_read_ops{};
@@ -154,11 +196,20 @@ void epoll_test(
             int server_fd = 0;
 
             if (!is_client) {
+                constexpr int opt = 1;
+
                 server_fd = socket(AF_INET, SOCK_STREAM, 0);
                 std::cout << "server_fd: " << server_fd << std::endl;
-                fcntl(server_fd, F_SETFL, O_NONBLOCK);
-                constexpr int opt = 1;
+
                 setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+
+                if (!tune_socket(server_fd)) {
+                    std::cerr << "Failed to tune socket\n";
+                    close(server_fd);
+                    return;
+                }
+
                 sockaddr_in addr{};
                 addr.sin_family = AF_INET;
                 inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
@@ -178,10 +229,17 @@ void epoll_test(
                 server_event.data.u64 = pack_fd_and_index(server_fd, 0);
                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
                 std::cout << "Thread " << i << " listening on port " << (port) << std::endl;
-            } else  {
+            } else {
                 for (int c = 0; c < clients_per_thread; c++) {
                     const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
-                    fcntl(client_fd, F_SETFL, O_NONBLOCK);
+
+                    if (!tune_socket(client_fd)) {
+                         std::cerr << "Failed to tune socket\n";
+                         close(client_fd);
+                         return;
+                     }
+
+                    // Enable TCP_QUICKACK
                     sockaddr_in server_addr{};
                     server_addr.sin_family = AF_INET;
                     server_addr.sin_port = htons(port);
@@ -229,11 +287,10 @@ void epoll_test(
                                 break;
                             }
 
-                            fcntl(client_fd, F_SETFL, O_NONBLOCK);
-
-                            int flag = 1;
-                            if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
-                                perror("setsockopt TCP_NODELAY failed");
+                            if (!tune_socket(client_fd)) {
+                                std::cerr << "Failed to tune socket\n";
+                                close(client_fd);
+                                break;
                             }
 
 
@@ -315,11 +372,13 @@ void epoll_test(
 //     const int threads,
 //     const int data_size,
 //     const int max_events,
-//     const std::string &ip_address,
-//     const int base_port
+//     const std::string& ip_address,
+//     const std::vector<int>& ports,
+//     const bool ports_count_up
 // ) {
 //     for (int threadId = 0; threadId < threads; threadId++) {
-//         std::thread([threadId, clients_per_thread, max_events, data_size, base_port, ip_address, is_client]() {
+//         const auto port = ports_count_up ? (ports[0] + threadId) : ports[threadId % ports.size()];
+//         std::thread([threadId, clients_per_thread, max_events, data_size, port, ip_address, is_client]() {
 //             try {
 //                 int connection_index = 0;
 //                 constexpr auto params = new io_uring_params();
@@ -329,11 +388,7 @@ void epoll_test(
 //                 const auto sq_ptr = mmap(nullptr, sq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_SQ_RING);
 //                 if (sq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on sq_ptr");
 //                 const auto sqes_size = params->sq_entries * sizeof(io_uring_sqe);
-//                 const auto sqes =
-//                         static_cast<struct io_uring_sqe *>(
-//                             mmap(nullptr, sqes_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd,
-//                                  IORING_OFF_SQES)
-//                         );
+//                 const auto sqes = static_cast<struct io_uring_sqe *>(mmap(nullptr, sqes_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd,IORING_OFF_SQES));
 //                 if (sqes == MAP_FAILED) throw std::runtime_error("mmap failed on sqes");
 //                 const auto cq_ring_size = params->cq_off.cqes + params->cq_entries * sizeof(struct io_uring_cqe);
 //                 const auto cq_ptr = mmap(NULL, cq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_CQ_RING);
@@ -555,7 +610,7 @@ int main(int argc, char *argv[]) {
     if (is_epoll) {
         epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports, port_count_up);
     } else {
-        // iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports);
+        iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports, port_count_up);
     }
 
     std::thread monitor_thread([is_client]() {
