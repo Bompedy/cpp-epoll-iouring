@@ -610,7 +610,7 @@ int main(int argc, char *argv[]) {
     if (is_epoll) {
         epoll_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports, port_count_up);
     } else {
-        iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports, port_count_up);
+        // iouring_test(is_client, clients_per_thread, threads, data_size, max_events, ip_address, ports, port_count_up);
     }
 
     std::thread monitor_thread([is_client]() {
