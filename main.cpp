@@ -97,7 +97,7 @@ struct Connection {
     size_t read_pos;
     size_t write_pos;
     bool should_write;
-    bool server_side_conn;
+    int fd;
 };
 
 uint64_t pack_fd_index_opcode(int fd, uint32_t index, uint8_t opcode) {
@@ -181,13 +181,11 @@ void epoll_test(
             auto connection_index = 0;
             std::vector<Connection> connections;
             connections.resize(clients_per_thread + 100);
-
             for (auto &conn: connections) {
                 conn.read_buffer = new char[data_size];
                 conn.write_buffer = new char[data_size];
                 conn.should_write = true;
                 conn.read_pos = conn.write_pos = 0;
-                conn.server_side_conn = false;
             }
 
             const auto epoll_fd = epoll_create1(0);
@@ -269,7 +267,7 @@ void epoll_test(
                 const auto n = epoll_wait(epoll_fd, epoll_events, max_events, 0);
                 for (int event_id = 0; event_id < n; event_id++) {
                     const auto event = epoll_events[event_id];
-                    auto fd_and_index = epoll_events[event_id].data.u64;
+                    const auto fd_and_index = epoll_events[event_id].data.u64;
                     int fd;
                     uint32_t index;
                     unpack_fd_and_index(fd_and_index, fd, index);
@@ -296,7 +294,6 @@ void epoll_test(
 
                             epoll_event client_event{};
                             client_event.events = EPOLLIN | EPOLLET | EPOLLOUT;
-                            connections[connection_index].server_side_conn = true;
                             client_event.data.u64 = pack_fd_and_index(client_fd, connection_index++);
                             epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
                         }
@@ -366,6 +363,8 @@ void epoll_test(
     }
 }
 
+constexpr size_t MAX_FDS = 1024;
+//
 // void iouring_test(
 //     const bool is_client,
 //     const int clients_per_thread,
@@ -380,10 +379,9 @@ void epoll_test(
 //         const auto port = ports_count_up ? (ports[0] + threadId) : ports[threadId % ports.size()];
 //         std::thread([threadId, clients_per_thread, max_events, data_size, port, ip_address, is_client]() {
 //             try {
-//                 int connection_index = 0;
 //                 constexpr auto params = new io_uring_params();
 //                 params->flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
-//                 const auto ring_fd = io_uring_setup(1000, params);
+//                 const auto ring_fd = io_uring_setup(max_events, params);
 //                 const auto sq_ring_size = params->sq_off.array + params->sq_entries + sizeof(__u32);
 //                 const auto sq_ptr = mmap(nullptr, sq_ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_fd, IORING_OFF_SQ_RING);
 //                 if (sq_ptr == MAP_FAILED) throw std::runtime_error("mmap failed on sq_ptr");
@@ -403,7 +401,23 @@ void epoll_test(
 //                 const auto sq_tail = reinterpret_cast<std::atomic<uint32_t>*>(static_cast<char*>(sq_ptr) + params->sq_off.tail);
 //                 const auto sq_ring_mask = reinterpret_cast<uint32_t*>(static_cast<char*>(sq_ptr) + params->sq_off.ring_mask);
 //                 const auto sq_array = reinterpret_cast<uint32_t *>(static_cast<char *>(sq_ptr) + params->sq_off.array);
-//                 const auto sq_flags = reinterpret_cast<std::atomic<uint32_t> *>(static_cast<char *>(sq_ptr) + params->sq_off.flags);
+//                 const auto sq_flags = reinterpret_cast<std::atomic<uint32_t> *>(
+//                     static_cast<char *>(sq_ptr) + params->sq_off.flags);
+//
+//                 auto connection_index = 0;
+//                 std::vector<Connection> connections;
+//                 connections.resize(clients_per_thread + 100);
+//                 for (auto &conn: connections) {
+//                     conn.read_buffer = new char[data_size];
+//                     conn.write_buffer = new char[data_size];
+//                     conn.should_write = true;
+//                     conn.read_pos = conn.write_pos = 0;
+//                     conn.fd = -1;
+//                 }
+//
+//                 const auto fd_slots = new int[MAX_FDS];
+//                 io_uring_register(ring_fd, IORING_REGISTER_FILES, fd_slots, MAX_FDS);
+//
 //
 //                 auto to_submit = 0;
 //
@@ -424,8 +438,9 @@ void epoll_test(
 //
 //                 sockaddr_in server_addr{};
 //                 server_addr.sin_family = AF_INET;
-//                 server_addr.sin_port = htons(base_port + threadId);
+//                 server_addr.sin_port = htons(port);
 //                 inet_pton(AF_INET, ip_address.c_str(), &server_addr.sin_addr);
+//
 //                 sockaddr_in cli_in_addr{};
 //                 socklen_t cli_addr_len = sizeof(cli_in_addr);
 //                 if (!is_client) {
@@ -437,7 +452,7 @@ void epoll_test(
 //                     sockaddr_in addr{};
 //                     addr.sin_family = AF_INET;
 //                     inet_pton(AF_INET, ip_address.c_str(), &addr.sin_addr);
-//                     addr.sin_port = htons(base_port + threadId);
+//                     addr.sin_port = htons(port);
 //
 //                     if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
 //                         perror("bind");
@@ -448,15 +463,15 @@ void epoll_test(
 //                         return;
 //                     }
 //
-//                     // submit([cli_addr_len, &connection_index, &cli_in_addr](io_uring_sqe &sqe) {
-//                     //     sqe.opcode = IORING_OP_ACCEPT;
-//                     //     sqe.ioprio |= IORING_ACCEPT_MULTISHOT;
-//                     //     sqe.fd = server_fd;
-//                     //     sqe.off = &cli_addr_len;
-//                     //     sqe.addr = reinterpret_cast<unsigned long>(&cli_in_addr);
-//                     //     sqe.len = 0;
-//                     //     sqe.user_data = pack_fd_index_opcode(server_fd, connection_index++, IORING_OP_ACCEPT);
-//                     // });
+//                     submit([cli_addr_len, &connection_index, &cli_in_addr](io_uring_sqe &sqe) {
+//                         sqe.opcode = IORING_OP_ACCEPT;
+//                         sqe.ioprio |= IORING_ACCEPT_MULTISHOT;
+//                         sqe.fd = server_fd;
+//                         sqe.off = &cli_addr_len;
+//                         sqe.addr = reinterpret_cast<unsigned long>(&cli_in_addr);
+//                         sqe.len = 0;
+//                         sqe.user_data = pack_fd_index_opcode(server_fd, connection_index++, IORING_OP_ACCEPT);
+//                     });
 //                 } else {
 //                     for (int c = 0; c < clients_per_thread; c++) {
 //                         const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -512,14 +527,16 @@ void epoll_test(
 //                                             sqe.user_data = user_data;
 //                                         });
 //                                     } else {
+//
 //                                         submit([fd, conn_index](io_uring_sqe &sqe) {
-//                                             sqe.opcode = IORING_OP_READ_MULTISHOT;
+//                                             sqe.opcode = IORING_OP_READ;
 //                                             sqe.fd = conn_index;
 //                                             sqe.flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
 //                                             sqe.buf_group = 0;
 //                                             sqe.user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_READ_MULTISHOT);
 //                                         });
 //                                     }
+//                                     break;
 //                                 case IORING_OP_ACCEPT:
 //                                     if (response < 0) {
 //                                         throw std::runtime_error("Error accepting!");
@@ -534,11 +551,9 @@ void epoll_test(
 //                                         sqe.buf_group = 0;
 //                                         sqe.user_data = pack_fd_index_opcode(fd, response, IORING_OP_READ_MULTISHOT);
 //                                     });
-//
+//                                     break;
+//                                 default: ;
 //                             }
-//                             // if (op == OP_CONNECT) {
-//                             //
-//                             // }
 //                         }
 //
 //                         cq_head->fetch_add(to_process);
