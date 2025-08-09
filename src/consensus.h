@@ -8,8 +8,15 @@
 #include "temp.h"
 
 
-enum class Algorithm : uint8_t { MULTI_PAXOS, PAXOS, RABIA };
-enum class IOType : uint8_t { IO_URING, EPOLL };
+enum class Algorithm : uint8_t {
+    MULTI_PAXOS,
+    PAXOS,
+    RABIA
+};
+enum class IOType : uint8_t {
+    IO_URING,
+    EPOLL
+};
 
 struct Address {
     std::string host;
@@ -39,21 +46,28 @@ class Consensus {
     std::atomic<bool> running_{true};
     std::vector<std::thread> threads_;
 
-    void epoll_provider(Algorithm algo,
-                       const std::vector<InstanceConfig> &instance_configs,
-                       int total_pipes, int total_connections);
+    void epoll_provider(
+        Algorithm algo,
+        const std::vector<InstanceConfig> &instance_configs,
+        int total_pipes,
+        int total_connections
+    );
 
-    void io_uring_provider(Algorithm algo,
-                           const std::vector<InstanceConfig> &instance_configs,
-                           int total_pipes, int total_connections);
-
+    void io_uring_provider(
+        Algorithm algo,
+        const std::vector<InstanceConfig> &instance_configs,
+        int total_pipes,
+        int total_connections
+    );
 public:
-    Consensus(IOType io_type,
-              Algorithm algo,
-              const std::vector<InstanceConfig> &instance_configs,
-              int total_pipes,
-              int total_connections,
-              size_t buffer_size);
+    Consensus(
+        IOType io_type,
+        Algorithm algo,
+        const std::vector<InstanceConfig> &instance_configs,
+        int total_pipes,
+        int total_connections,
+        size_t buffer_size
+    );
 
     void shutdown();
     ~Consensus();
