@@ -24,13 +24,13 @@ Consensus<log_size>::Consensus(
     threads.emplace_back([this] {
         try {
             while (running.load()) {
-                int committed = committed.load();
-                int consumed = consumed.load();
+                const auto current_commit = committed.load();
+                const auto current_consume = consumed.load();
 
-                if (consumed < committed) {
-                    std::cout << "Consuming log index: " << consumed << std::endl;
-                    acks[consumed % log_size].store(0);
-                    consumed.store(consumed + 1);
+                if (current_consume < current_commit) {
+                    std::cout << "Consuming log index: " << current_consume << std::endl;
+                    acks[current_consume % log_size].store(0);
+                    consumed.store(current_consume + 1);
                 } else {
                     std::this_thread::yield();
                 }
