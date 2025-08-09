@@ -28,9 +28,10 @@ Consensus<log_size>::Consensus(
                 const auto current_consume = consumed.load();
 
                 if (current_consume < current_commit) {
-                    std::cout << "Consuming log index: " << current_consume << std::endl;
-                    acks[current_consume % log_size].store(0);
-                    consumed.store(current_consume + 1);
+                    const auto next = current_consume + 1;
+                    std::cout << "Consuming log index: " << next << std::endl;
+                    acks[next % log_size].store(0);
+                    consumed.store(next);
                 } else {
                     std::this_thread::yield();
                 }
