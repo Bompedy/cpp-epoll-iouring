@@ -17,20 +17,20 @@ Consensus<log_size>::Consensus(
     const size_t buffer_size
 ) {
     for (size_t i = 0; i < log_size; ++i) {
-        std::atomic_init(&acks_[i], 0);
-        log_[i] = std::make_unique<char[]>(buffer_size);
+        std::atomic_init(&acks[i], 0);
+        log[i] = std::make_unique<char[]>(buffer_size);
     }
 
-    threads_.emplace_back([this] {
+    threads.emplace_back([this] {
         try {
-            while (running_.load()) {
-                int committed = committed_.load();
-                int consumed = consumed_.load();
+            while (running.load()) {
+                int committed = committed.load();
+                int consumed = consumed.load();
 
                 if (consumed < committed) {
                     std::cout << "Consuming log index: " << consumed << std::endl;
-                    acks_[consumed % log_size].store(0);
-                    consumed_.store(consumed + 1);
+                    acks[consumed % log_size].store(0);
+                    consumed.store(consumed + 1);
                 } else {
                     std::this_thread::yield();
                 }
@@ -50,8 +50,8 @@ Consensus<log_size>::Consensus(
 
 template<size_t log_size>
 void Consensus<log_size>::shutdown() {
-    running_.store(false);
-    for (auto &t : threads_) {
+    running.store(false);
+    for (auto &t : threads) {
         if (t.joinable()) {
             t.join();
         }

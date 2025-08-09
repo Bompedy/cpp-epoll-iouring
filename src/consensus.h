@@ -39,12 +39,12 @@ struct Connection {
 
 template<size_t log_size>
 class Consensus {
-    std::array<std::unique_ptr<char[]>, log_size> log_;
-    std::atomic_char acks_[log_size];
-    std::atomic<int> committed_{};
-    std::atomic<int> consumed_{};
-    std::atomic<bool> running_{true};
-    std::vector<std::thread> threads_;
+    std::array<std::unique_ptr<char[]>, log_size> log;
+    std::atomic_char acks[log_size];
+    std::atomic<int> committed{};
+    std::atomic<int> consumed{};
+    std::atomic<bool> running{true};
+    std::vector<std::thread> threads;
 
     void epoll_provider(
         Algorithm algo,
