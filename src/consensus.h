@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <sys/epoll.h>
 #include "temp.h"
@@ -18,9 +19,17 @@ enum class IOType : uint8_t {
     EPOLL
 };
 
-struct Address {
-    std::string host;
-    short port;
+class Address {
+    std::string host_;
+    unsigned short port_;
+
+    bool operator==(const Address& other) const {
+        return host_ == other.host_ && port_ == other.port_;
+    }
+public:
+    Address(std::string host, const unsigned short port) : host_(std::move(host)), port_(port) {}
+    const std::string& host() const { return host_; }
+    unsigned short port() const { return port_; }
 };
 
 struct InstanceConfig {
@@ -29,8 +38,8 @@ struct InstanceConfig {
 };
 
 struct Connection {
-    char* read_buffer;
-    char* write_buffer;
+    std::unique_ptr<char[]> read_buffer;
+    std::unique_ptr<char[]> write_buffer;
     size_t read_pos;
     size_t write_pos;
     bool open;
@@ -49,23 +58,25 @@ class Consensus {
     void epoll_provider(
         Algorithm algo,
         const std::vector<InstanceConfig> &instance_configs,
-        int total_pipes,
-        int total_connections
+        unsigned int total_pipes,
+        unsigned int total_connections,
+        size_t buffer_size
     );
 
     void io_uring_provider(
         Algorithm algo,
         const std::vector<InstanceConfig> &instance_configs,
-        int total_pipes,
-        int total_connections
+        unsigned int total_pipes,
+        unsigned int total_connections,
+        size_t buffer_size
     );
 public:
     Consensus(
         IOType io_type,
         Algorithm algo,
         const std::vector<InstanceConfig> &instance_configs,
-        int total_pipes,
-        int total_connections,
+        unsigned int total_pipes,
+        unsigned int total_connections,
         size_t buffer_size
     );
 

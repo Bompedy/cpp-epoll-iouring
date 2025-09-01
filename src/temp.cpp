@@ -11,7 +11,7 @@
 #include <pthread.h>
 #include <netinet/tcp.h>
 #include <io_uring.h>
-#include <asm/unistd_64.h>
+#include <asm-generic/unistd.h>
 
 int io_uring_setup(const unsigned entries, io_uring_params *params) {
     const int ring_fd = syscall(__NR_io_uring_setup, entries, params);
@@ -130,7 +130,7 @@ void pin_thread_to_core(const int core_id) {
 }
 
 
-int setup_server_socket(const std::string& address, const int port) {
+int setup_server_socket(const std::string& address, const unsigned short port) {
     constexpr int opt = 1;
     const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
 

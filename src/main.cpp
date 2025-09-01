@@ -22,7 +22,7 @@ int main() {
 
     const std::vector instance_configs0{
         InstanceConfig{
-            .host_config = { .host="127.0.0.1", .port=6969}, // host_config
+            .host_config = Address { "127.0.0.1", 6969},
             .peers = std::vector {
                 Address { "127.0.0.1", 6970 }
             }
@@ -31,7 +31,7 @@ int main() {
 
     const std::vector instance_configs1{
         InstanceConfig{
-            .host_config = { .host="127.0.0.1", .port=6970 },
+            .host_config = Address { "127.0.0.1", 6970 },
             .peers = std::vector {
                 Address{ "127.0.0.1", 6969 }
             }
