@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <netinet/tcp.h>
-#include <io_uring.h>
+#include <linux/io_uring.h>
 #include <asm-generic/unistd.h>
 
 int io_uring_setup(const unsigned entries, io_uring_params *params) {
@@ -42,7 +42,13 @@ int io_uring_register(
 ) {
     const int result = syscall(__NR_io_uring_register, ring_fd, op, arg, nr_args);
     if (result < 0) {
-        throw std::runtime_error("io_uring_register failed: " + std::string(std::strerror(errno)));
+        // Construct the error message string first
+        std::string err_msg = "io_uring_register buffers failed: ";
+        err_msg += strerror(-result);
+        err_msg += " (";
+        err_msg += std::to_string(result);
+        err_msg += ")\n";
+        throw std::runtime_error(err_msg);
     }
     return result;
 }
@@ -50,7 +56,7 @@ int io_uring_register(
 
 bool tune_socket(
     const int fd,
-    const int buffer_size,
+    const unsigned int buffer_size,
     const bool quick_ack,
     const bool no_delay
 ) {
@@ -98,9 +104,10 @@ bool tune_socket(
     return true;
 }
 
-unsigned long pack_fd_index_opcode(const int fd, const unsigned int index, const unsigned char opcode) {
-    return (static_cast<unsigned long>(fd) << 32) |
-           ((static_cast<unsigned long>(index) & 0xFFFFFF) << 8) |
+
+uint64_t pack_fd_index_opcode(const int fd, const unsigned int index, const unsigned char opcode) {
+    return (static_cast<uint64_t>(fd) << 32) |
+           ((static_cast<uint64_t>(index) & 0xFFFFFF) << 8) |
            (opcode & 0xFF);
 }
 

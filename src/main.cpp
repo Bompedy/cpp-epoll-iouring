@@ -38,8 +38,8 @@ int main() {
         }
     };
 
-   Consensus<256> node0(IOType::EPOLL, Algorithm::MULTI_PAXOS, instance_configs0, 1, 1, 4096);
-   Consensus<256> node1(IOType::EPOLL, Algorithm::MULTI_PAXOS, instance_configs1, 1, 1, 4096);
+   Consensus<256> node0(0, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs0, 10, 10, 4096);
+   Consensus<256> node1(1, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs1, 10, 10, 4096);
 
     while (RUNNING.load()) {
         pause();

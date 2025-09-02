@@ -56,6 +56,7 @@ class Consensus {
     std::vector<std::thread> threads;
 
     void epoll_provider(
+        int id,
         Algorithm algo,
         const std::vector<InstanceConfig> &instance_configs,
         unsigned int total_pipes,
@@ -64,6 +65,7 @@ class Consensus {
     );
 
     void io_uring_provider(
+        int id,
         Algorithm algo,
         const std::vector<InstanceConfig> &instance_configs,
         unsigned int total_pipes,
@@ -72,6 +74,7 @@ class Consensus {
     );
 public:
     Consensus(
+        int id,
         IOType io_type,
         Algorithm algo,
         const std::vector<InstanceConfig> &instance_configs,
