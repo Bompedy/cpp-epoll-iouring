@@ -93,7 +93,7 @@ void Consensus<log_size>::epoll_provider(
                 std::cout << thread_id << ": listening on " << host_config.host() << ":" << host_config.port() << " " << server_fd << std::endl;
                 epoll_event server_event{};
                 server_event.events = EPOLLIN | EPOLLET;
-                server_event.data.u64 = pack_fd_and_index(server_fd, 0);
+                // server_event.data.u64 = pack_fd_and_index(server_fd, 0);
                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
 
                 std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -139,64 +139,135 @@ void Consensus<log_size>::epoll_provider(
     }
 }
 
-class Buffer {
-    Buffer(const size_t capacity) : capacity(capacity), data(std::make_unique<char[]>(capacity)) {
+template<typename T>
+concept AllowedType = std::is_same_v<T, char> ||
+                      std::is_same_v<T, unsigned char> ||
+                      std::is_same_v<T, short> ||
+                      std::is_same_v<T, unsigned short> ||
+                      std::is_same_v<T, int> ||
+                      std::is_same_v<T, unsigned int> ||
+                      std::is_same_v<T, long long> ||
+                      std::is_same_v<T, unsigned long long> ||
+                      std::is_same_v<T, float> ||
+                      std::is_same_v<T, double>;
+
+struct RingBuffer {
+    explicit RingBuffer(const size_t capacity) : buffer(std::make_unique<char[]>(capacity)), capacity(capacity) {
 
     }
 
-    unsigned int read_head = 0;
-    unsigned int write_head_a = 0;
-    unsigned int write_head_b = 0;
-    const size_t capacity;
-    std::unique_ptr<char[]> data;
+    std::pair<__u64, size_t> next_write() const {
+        const auto hmod = h % capacity;
+        const auto tmod = t % capacity;
+        return {reinterpret_cast<__u64>(buffer.get() + tmod), (hmod < tmod) ? (capacity - tmod) : (hmod - tmod)};
+    }
 
-    template<typename T>
-    void put_value(T value) {
-        constexpr size_t size = sizeof(T);
-        if (capacity - write_head_a < size) {
-            if (read_head - write_head_b < size) {
-                // write from write_head_b
-            } else {
-                throw std::runtime_error("Buffer overflow");
-            }
-        } else {
-            // write form write_head_a
+    std::pair<__u64, size_t> next_read() const {
+        const auto hmod = h % capacity;
+        const auto tmod = t % capacity;
+        return {reinterpret_cast<__u64>(buffer.get() + hmod), (tmod <= hmod) ? (capacity - hmod) : (tmod - hmod)};
+    }
+
+    template<AllowedType T>
+    void put(const T& value) {
+        const auto size = sizeof(T);
+        if ((h + size) - t >= capacity) {
+            throw std::runtime_error("BUFFER OVERFLOW");
         }
+        if (const auto hmod = h % capacity; hmod + size > capacity) {
+            const auto value_bytes = reinterpret_cast<const char*>(&value);
+            std::memcpy(buffer.get() + hmod, value_bytes, capacity - hmod);
+            std::memcpy(buffer.get(), value_bytes + capacity - hmod, (hmod + size) - capacity);
+        } else {
+            std::memcpy(buffer.get() + hmod, &value, size);
+        }
+        h += size;
     }
 
-public:
+    template<AllowedType T>
+    T get() {
+        const auto size = sizeof(T);
+        if (h - t < size) {
+            throw std::runtime_error("BUFFER UNDERFLOW");
+        }
+        T value;
+        const auto value_bytes = reinterpret_cast<char*>(&value);
+        if (const auto tmod = t % capacity; tmod + size > capacity) {
+            std::memcpy(value_bytes, buffer.get() + tmod, capacity - tmod);
+            std::memcpy(value_bytes + (capacity - tmod), buffer.get(), (tmod + size) - capacity);
+        } else {
+            std::memcpy(value_bytes, buffer.get() + tmod, size);
+        }
+        t += size;
+        return value;
+    }
+
+    void get_bytes(char *value_bytes, const size_t size) {
+        if (h - t < size) {
+            throw std::runtime_error("BUFFER UNDERFLOW");
+        }
+        if (const auto tmod = t % capacity; tmod + size > capacity) {
+            std::memcpy(value_bytes, buffer.get() + tmod, capacity - tmod);
+            std::memcpy(value_bytes + (capacity - tmod), buffer.get(), (tmod + size) - capacity);
+        } else {
+            std::memcpy(value_bytes, buffer.get() + tmod, size);
+        }
+        t += size;
+    }
+
+    void add_tail(const size_t value) {
+        if (h - (t + value) >= capacity) {
+            throw std::runtime_error("BUFFER OVERFLOW");
+        }
+        if (h - (t + value) < 0) {
+            throw std::runtime_error("BUFFER UNDERFLOW");
+        }
+        t += value;
+    }
+
+    void add_head(const size_t value) {
+        if ((h + value) - t >= capacity) {
+            throw std::runtime_error("BUFFER OVERFLOW");
+        }
+        if ((h + value) - t < 0) {
+            throw std::runtime_error("BUFFER OVERFLOW");
+        }
+        h += value;
+    }
+
+    unsigned int remaining() const {
+        return h - t;
+    }
+
+    void put_bytes(const char* bytes, const size_t size) {
+        if ((h + size) - t >= capacity) {
+            throw std::runtime_error("BUFFER OVERFLOW");
+        }
+        if (const auto hmod = h % capacity; hmod + size > capacity) {
+            std::memcpy(buffer.get() + hmod, bytes, capacity - hmod);
+            std::memcpy(buffer.get(), bytes + capacity - hmod, (hmod + size) - capacity);
+        } else {
+            std::memcpy(buffer.get() + hmod, bytes, size);
+        }
+        h += size;
+    }
+
     char* get_data() const {
-        return data.get();
+        return buffer.get();
     }
 
-    char get_byte() {}
-    short get_short() {}
-    int get_int() {}
-    float get_float() {}
-    long get_long() {}
-    double get_double() {}
-    char* get_bytes(const size_t size) {}
-
-    void put_byte(const char value) { return put_value<char>(value); }
-    void put_short(const short value) { return put_value<short>(value); }
-    void put_int(const int value) { return put_value<int>(value); }
-    void put_float(const float value) { return put_value<float>(value); }
-    void put_long(const long value) { return put_value<long>(value); }
-    void put_double(const double value) { return put_value<double>(value); }
-
-    void put_bytes(const char* value, const size_t size) {
-
-    }
-
-    size_t get_capacity() const { return capacity; }
-    size_t get_read_index() const { return read_head; }
+private:
+    std::unique_ptr<char[]> buffer;
+    const size_t capacity;
+    size_t h = 0;
+    size_t t = 0;
 };
 
 class BufferTracker {
     bool write_in_progress = false;
-    Buffer read_buffer;
-    int write_buffer_index, read_buffer_index;
-    Buffer write_buffer;
+    RingBuffer read_buffer;
+    unsigned int write_buffer_index, read_buffer_index;
+    RingBuffer write_buffer;
 public:
     BufferTracker(const size_t buffer_capacity, const unsigned int read_buffer_index, const unsigned int write_buffer_index)
         : read_buffer(buffer_capacity),
@@ -213,11 +284,11 @@ public:
         write_in_progress = value;
     }
 
-    const Buffer& get_read_buffer() const {
+    RingBuffer& get_read_buffer() {
         return read_buffer;
     }
 
-    const Buffer& get_write_buffer() const {
+    RingBuffer& get_write_buffer() {
         return write_buffer;
     }
 
@@ -229,6 +300,7 @@ public:
         return read_buffer_index;
     }
 };
+
 
 struct IoUringContext {
     int ring_fd = -1;
@@ -254,11 +326,16 @@ struct IoUringContext {
     int socket_index = 0;
     int* fd_slots = nullptr;
 
+    std::vector<iovec> io_vecs;
+
+    int node_id = 0;
+
     static constexpr size_t buffer_count = 1000;
 
     std::vector<std::unique_ptr<BufferTracker>> trackers;
 
-    void initialize(const size_t buffer_size, const int sq_entries = 1024) {
+    void initialize(const size_t buffer_size, const int sq_entries, const int node_id) {
+        this->node_id = node_id;
         params = std::make_unique<io_uring_params>();
         std::memset(params.get(), 0, sizeof(io_uring_params));
         params->flags |= IORING_SETUP_SQPOLL;
@@ -299,6 +376,8 @@ struct IoUringContext {
         fd_slots = new int[buffer_count];
         io_uring_register(ring_fd, IORING_REGISTER_FILES, fd_slots, buffer_count);
 
+
+        trackers.resize(buffer_count);
         io_vecs.resize(buffer_count * 2);
         for (int i = 0; i < buffer_count; ++i) {
             trackers[i] = std::make_unique<BufferTracker>(buffer_size, i, i+buffer_count);
@@ -315,7 +394,7 @@ struct IoUringContext {
     ~IoUringContext() {
         if (ring_fd != -1) close(ring_fd);
         delete[] fd_slots;
-        delete params;
+        // delete params;
 
         if (sq_ptr) munmap(sq_ptr, params->sq_off.array + params->sq_entries * sizeof(__u32));
         if (sqes) munmap(sqes, params->sq_entries * sizeof(io_uring_sqe));
@@ -353,7 +432,7 @@ struct IoUringContext {
     }
 
     void submit_accept(
-        const unsigned int server_fd,
+        const int server_fd,
         sockaddr_in &cli_in_addr,
         socklen_t &cli_addr_len
     ) const {
@@ -367,7 +446,7 @@ struct IoUringContext {
     }
 
     void submit_connect(
-        const unsigned int client_fd,
+        const int client_fd,
         const unsigned int client_index,
         sockaddr_in *target_ptr
     ) const {
@@ -381,19 +460,20 @@ struct IoUringContext {
     }
 
     void submit_write(
-        const unsigned int fd,
+        const int fd,
         const unsigned int conn_index,
         BufferTracker &tracker
     ) const {
         if (!tracker.is_write_in_progress()) {
+            auto [address, size] = tracker.get_write_buffer().next_write();
             tracker.set_write_in_progress(true);
             const auto [sqe, tail] = get_sqe();
             sqe->opcode = IORING_OP_WRITE_FIXED;
             sqe->fd = static_cast<__s32>(conn_index);
             sqe->buf_index = tracker.get_write_buffer_index();
-            // sqe->addr = reinterpret_cast<__u64>(write_buffer);
+            sqe->addr = address;
             sqe->off = 0;
-            // sqe->len = size;
+            sqe->len = size;
             sqe->flags = IOSQE_FIXED_FILE;
             sqe->user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_WRITE_FIXED);
             sq_tail->store(tail + 1, std::memory_order_release);
@@ -401,17 +481,17 @@ struct IoUringContext {
     }
 
     void submit_read(
-        const unsigned int fd,
-        const unsigned int conn_index,
-        const BufferTracker &tracker
+        const int fd,
+        const int conn_index,
+        BufferTracker &tracker
     ) const {
+        auto [address, size] = tracker.get_read_buffer().next_read();
         const auto [sqe, tail] = get_sqe();
         sqe->opcode = IORING_OP_READ_FIXED;
-        sqe->fd = static_cast<__s32>(conn_index);
+        sqe->fd = conn_index;
         sqe->buf_index = tracker.get_read_buffer_index();
-        sqe->addr = reinterpret_cast<__u64>(tracker.get_read_buffer().get_data() + tracker.get_read_buffer().
-                                            get_read_index());
-        sqe->len = tracker.get_read_buffer().get_capacity() - tracker.get_read_buffer().get_read_index();
+        sqe->addr = address;
+        sqe->len = size;
         sqe->off = 0;
         sqe->flags = IOSQE_FIXED_FILE;
         sqe->user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_READ_FIXED);
@@ -419,39 +499,25 @@ struct IoUringContext {
     }
 
     void on_write(
-        const unsigned int fd,
-        const unsigned int conn_index,
+        const int fd,
+        const int conn_index,
         const int response
     ) const {
+        if (response <= 0) {
+            throw std::runtime_error("ERROR WRITING TO SOCKET");
+        }
         auto &tracker = *trackers[conn_index];
+        auto &write_buffer = tracker.get_write_buffer();
         tracker.set_write_in_progress(false);
-        // check if everything is written out, if not submit write
-
-        //
-        // auto write = [&buffer_trackers, submit, &buffers](const int fd, const int conn_index, const unsigned int size, char* data) {
-        //     auto &tracker = *buffer_trackers[conn_index];
-        //     char *write_buffer = buffers[conn_index + buffer_count].get();
-        //     tracker.write_queue.push_back({data, 0, size});
-        //     if (!tracker.write_in_progress) {
-        //         tracker.write_in_progress = true;
-        //         memmove(write_buffer, data, size);
-        //         submit([conn_index, fd, &tracker, write_buffer, size](io_uring_sqe &sqe) {
-        //             sqe.opcode = IORING_OP_WRITE_FIXED;
-        //             sqe.fd = static_cast<__s32>(conn_index);
-        //             sqe.buf_index = conn_index + buffer_count;
-        //             sqe.addr = reinterpret_cast<__u64>(write_buffer);
-        //             sqe.off = 0;
-        //             sqe.len = size;
-        //             sqe.flags = IOSQE_FIXED_FILE;
-        //             sqe.user_data = pack_fd_index_opcode(fd, conn_index, IORING_OP_WRITE_FIXED);
-        //         });
-        //     }
-        // };
+        write_buffer.add_tail(response);
+        if (write_buffer.remaining() > 0) {
+            submit_write(fd, conn_index, tracker);
+        }
     }
 
     void on_read(
-        const unsigned int fd,
-        const unsigned int conn_index,
+        const int fd,
+        const int conn_index,
         const int response
     ) {
         if (response < 0) {
@@ -462,50 +528,25 @@ struct IoUringContext {
         }
 
         auto &tracker = *trackers[conn_index];
-        //
-        // auto& tracker = *buffer_trackers[conn_index];
-        // tracker.read_offset += response;
-        // char* start_read_buffer = buffers[conn_index].get();
-        // char* read_buffer = start_read_buffer;
-        // auto completed_size = 0u;
-        // while (true) {
-        //     if (tracker.read_offset < 4) {
-        //         break;
-        //     }
-        //     const auto size = *reinterpret_cast<uint32_t*>(read_buffer);
-        //     if (tracker.read_offset < 4 + size) {
-        //         break;
-        //     }
-        //     if (const auto op = read_buffer[4]; op == 0) {
-        //
-        //
-        //     }
-        //     tracker.read_offset -= 4 + size;
-        //     read_buffer += 4 + size;
-        //     completed_size += 4 + size;
-        // }
-        // if (tracker.read_offset > 0) {
-        //     memmove(start_read_buffer, start_read_buffer + completed_size, tracker.read_offset);
-        // }
-        //
-        // ++ops;
-        // submit([buf_ptr = buffers[conn_index].get(), buffer_size, conn_index, user_data = cq.user_data, &tracker](io_uring_sqe &sqe) {
-        //         sqe.opcode = IORING_OP_READ_FIXED;
-        //         sqe.fd = static_cast<__s32>(conn_index);
-        //         sqe.buf_index = conn_index;
-        //         sqe.addr = reinterpret_cast<__u64>(buf_ptr + tracker.read_offset);
-        //         sqe.off = 0;
-        //         sqe.len = buffer_size - tracker.read_offset;
-        //         sqe.flags = IOSQE_FIXED_FILE;
-        //         sqe.user_data = user_data;
-        // });
+        auto& read_buffer = tracker.get_read_buffer();
+        read_buffer.add_head(response);
+        while (true) {
+            if (read_buffer.remaining() >= 4) {
+                if (const auto amount = read_buffer.get<unsigned int>(); read_buffer.remaining() >= amount) {
+                    submit_write(fd, conn_index, tracker);
+                } else {
+                    read_buffer.add_tail(-4);
+                    break;
+                }
+            } else break;
+        }
 
         submit_read(fd, conn_index, tracker);
     }
 
     void on_connect(
-        const unsigned int fd,
-        const unsigned int conn_index,
+        const int fd,
+        const int conn_index,
         const int response
     ) {
         if (response < 0) {
@@ -518,7 +559,7 @@ struct IoUringContext {
     }
 
     void on_accept(
-        const unsigned int fd,
+        const int fd,
         const int response
     ) {
         if (response < 0) {
@@ -535,14 +576,10 @@ struct IoUringContext {
         sockaddr_in cli_in_addr{};
         socklen_t cli_addr_len = sizeof(cli_in_addr);
         submit_accept(fd, cli_in_addr, cli_addr_len);
-        const auto &tracker = *trackers[client_index];
+        auto &tracker = *trackers[client_index];
         submit_read(fd, client_index, tracker);
     }
-
-private:
-    std::vector<iovec> io_vecs;
 };
-
 
 template<size_t log_size>
 void Consensus<log_size>::io_uring_provider(
@@ -564,7 +601,7 @@ void Consensus<log_size>::io_uring_provider(
 
                 try {
                     const auto context = std::make_shared<IoUringContext>();
-                    context->initialize(buffer_size);
+                    context->initialize(buffer_size, 1024, id);
 
                     sockaddr_in server_addr{};
                     server_addr.sin_family = AF_INET;
@@ -618,7 +655,7 @@ void Consensus<log_size>::io_uring_provider(
                                     }
 
                                     case IORING_OP_ACCEPT: {
-                                         context->on_accept(fd, response);
+                                        context->on_accept(fd, response);
                                         break;
                                     }
 

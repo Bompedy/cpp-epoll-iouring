@@ -105,7 +105,7 @@ bool tune_socket(
 }
 
 
-uint64_t pack_fd_index_opcode(const int fd, const unsigned int index, const unsigned char opcode) {
+uint64_t pack_fd_index_opcode(const unsigned int fd, const unsigned int index, const unsigned char opcode) {
     return (static_cast<uint64_t>(fd) << 32) |
            ((static_cast<uint64_t>(index) & 0xFFFFFF) << 8) |
            (opcode & 0xFF);
@@ -115,15 +115,6 @@ void unpack_fd_index_opcode(const unsigned long data, int &fd, unsigned int &ind
     fd = static_cast<int>(data >> 32);
     index = static_cast<unsigned int>((data >> 8) & 0xFFFFFF);
     opcode = static_cast<unsigned char>(data & 0xFF);
-}
-
-unsigned long pack_fd_and_index(const int fd, const unsigned int index) {
-    return (static_cast<unsigned long>(fd) << 32) | index;
-}
-
-void unpack_fd_and_index(const unsigned long data, int &fd, unsigned int &index) {
-    fd = static_cast<int>(data >> 32);
-    index = static_cast<unsigned int>(data & 0xFFFFFFFF);
 }
 
 void pin_thread_to_core(const int core_id) {
