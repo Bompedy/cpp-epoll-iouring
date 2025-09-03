@@ -38,8 +38,9 @@ int main() {
         }
     };
 
-   Consensus<256> node0(0, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs0, 10, 10, 4096);
-   Consensus<256> node1(1, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs1, 10, 10, 4096);
+   Consensus<256> node0(0, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs0, 1, 1, 1000000);
+   Consensus<256> node1(1, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs1, 1, 1, 1000000);
+
 
     while (RUNNING.load()) {
         pause();

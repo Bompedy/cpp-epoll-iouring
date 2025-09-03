@@ -46,6 +46,14 @@ struct Connection {
     ~Connection();
 };
 
+class IoUringProvider {
+
+};
+
+class EpollProvider {
+
+};
+
 template<size_t log_size>
 class Consensus {
     std::array<std::unique_ptr<char[]>, log_size> log;
