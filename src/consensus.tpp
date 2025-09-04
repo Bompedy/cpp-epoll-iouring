@@ -9,135 +9,6 @@
 
 #include "consensus.h"
 
-inline Connection::~Connection() = default;
-
-template<size_t log_size>
-Consensus<log_size>::Consensus(
-    const int id,
-    const IOType io_type,
-    const Algorithm algo,
-    const std::vector<InstanceConfig> &instance_configs,
-    const unsigned int total_pipes,
-    const unsigned int total_connections,
-    const size_t buffer_size
-) {
-    for (size_t i = 0; i < log_size; ++i) {
-        std::atomic_init(&acks[i], 0);
-        log[i] = std::make_unique<char[]>(buffer_size);
-    }
-
-    threads.emplace_back([this] {
-        try {
-            while (running.load()) {
-                const auto current_commit = committed.load();
-                const auto current_consume = consumed.load();
-
-                if (current_consume < current_commit) {
-                    const auto next = current_consume + 1;
-                    std::cout << "Consuming log index: " << next << std::endl;
-                    acks[next % log_size].store(0);
-                    consumed.store(next);
-                } else {
-                    std::this_thread::yield();
-                }
-            }
-        } catch (const std::exception &e) {
-            std::cerr << "Exception thrown: " << e.what() << std::endl;
-            shutdown();
-        }
-    });
-
-    if (io_type == IOType::EPOLL) {
-        epoll_provider(id, algo, instance_configs, total_pipes, total_connections, buffer_size);
-    } else if (io_type == IOType::IO_URING) {
-        std::cout << "Starting with id: " << id << std::endl;
-        io_uring_provider(id, algo, instance_configs, total_pipes, total_connections, buffer_size);
-    }
-}
-
-template<size_t log_size>
-void Consensus<log_size>::shutdown() {
-    if (running.exchange(false)) {
-        for (auto &t : threads) {
-            if (t.joinable()) {
-                t.join();
-            }
-        }
-    }
-}
-
-template<size_t log_size>
-Consensus<log_size>::~Consensus() {
-    shutdown();
-}
-
-template<size_t log_size>
-void Consensus<log_size>::epoll_provider(
-    int id,
-    const Algorithm algo,
-    const std::vector<InstanceConfig> &instance_configs,
-    const unsigned int total_pipes,
-    const unsigned int total_connections,
-    const size_t buffer_size
-) {
-    for (int thread_id = 0; thread_id < instance_configs.size(); ++thread_id) {
-        threads.emplace_back([&]() {
-            const int num_pipes = total_pipes / instance_configs.size();
-            const int num_connections = total_connections / instance_configs.size();
-            const auto&[host_config, peers] = instance_configs[thread_id];
-            try {
-                pin_thread_to_core(thread_id % std::thread::hardware_concurrency());
-                const auto epoll_fd = epoll_create1(0);
-                epoll_event epoll_events[512];
-                const auto server_fd = setup_server_socket(host_config.host(), host_config.port());
-                std::cout << thread_id << ": listening on " << host_config.host() << ":" << host_config.port() << " " << server_fd << std::endl;
-                epoll_event server_event{};
-                server_event.events = EPOLLIN | EPOLLET;
-                // server_event.data.u64 = pack_fd_and_index(server_fd, 0);
-                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event);
-
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-
-                for (const auto& address: peers) {
-                     sockaddr_in server_addr{};
-                     server_addr.sin_family = AF_INET;
-                     server_addr.sin_port = htons(address.port());
-                     inet_pton(AF_INET, address.host().c_str(), &server_addr.sin_addr);
-
-                     for (int i = 0; i < num_connections; i++) {
-                         const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-                         if (!tune_socket(client_fd)) {
-                             close(client_fd);
-                             throw std::runtime_error("Failed to create tune socket");
-                         }
-
-                         if (const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
-                             result == -1 && errno != EINPROGRESS && errno != EALREADY) {
-                             close(client_fd);
-                             throw std::runtime_error("Failed to connect");
-                         }
-
-                         // const auto read_buffer = new char[buffer_size];
-                         // const auto write_buffer = new char[buffer_size];
-
-                         // std::cout << "Connecting to user: " << host << ":" << port << " " << client_fd << std::endl;
-                         //
-                         // const auto connection = new Connection{read_buffer, write_buffer, 0, 0, true};
-                         //
-                         // connections.push_back(new Connection{read_buffer, write_buffer, 0, 0, true});
-                         // epoll_event client_event{};
-                         // client_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
-                         // client_event.data.u64 = pack_fd_and_index(client_fd, connection);
-                         // epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
-                     }
-                 }
-            } catch (std::exception &e) {
-                std::cerr << "Exception thrown: " << e.what() << std::endl;
-            }
-        });
-    }
-}
 
 template<typename T>
 concept AllowedType = std::is_same_v<T, char> ||
@@ -265,6 +136,8 @@ private:
 
 class BufferTracker {
     bool write_in_progress = false;
+    bool connection_in_progress = false;
+    int fd = 0;
     RingBuffer read_buffer;
     unsigned int write_buffer_index, read_buffer_index;
     RingBuffer write_buffer;
@@ -276,8 +149,24 @@ public:
           write_buffer(buffer_capacity) {
     }
 
+    int get_fd() const {
+        return fd;
+    }
+
+    void set_fd(const int fd) {
+        this->fd = fd;
+    }
+
     bool is_write_in_progress() const {
         return write_in_progress;
+    }
+
+    bool is_connection_in_progress() const {
+        return connection_in_progress;
+    }
+
+    void set_connection_in_progress(const bool value) {
+        connection_in_progress = value;
     }
 
     void set_write_in_progress(const bool value) {
@@ -301,6 +190,349 @@ public:
     }
 };
 
+
+inline Connection::~Connection() = default;
+
+template<size_t log_size>
+Consensus<log_size>::Consensus(
+    const IOType io_type,
+    const Algorithm algo,
+    const std::vector<InstanceConfig> &instance_configs,
+    const unsigned int total_pipes,
+    const unsigned int total_connections,
+    const size_t buffer_size
+) {
+    for (size_t i = 0; i < log_size; ++i) {
+        std::atomic_init(&acks[i], 0);
+        log[i] = std::make_unique<char[]>(buffer_size);
+    }
+
+    // threads.emplace_back([this] {
+    //     try {
+    //         while (running.load()) {
+    //             const auto current_commit = committed.load();
+    //             const auto current_consume = consumed.load();
+    //
+    //             if (current_consume < current_commit) {
+    //                 const auto next = current_consume + 1;
+    //                 std::cout << "Consuming log index: " << next << std::endl;
+    //                 acks[next % log_size].store(0);
+    //                 consumed.store(next);
+    //             } else {
+    //                 std::this_thread::yield();
+    //             }
+    //         }
+    //     } catch (const std::exception &e) {
+    //         std::cerr << "Exception thrown: " << e.what() << std::endl;
+    //         shutdown();
+    //     }
+    // });
+
+    if (io_type == IOType::EPOLL) {
+        epoll_provider(algo, instance_configs, total_pipes, total_connections, buffer_size);
+    } else if (io_type == IOType::IO_URING) {
+        io_uring_provider(algo, instance_configs, total_pipes, total_connections, buffer_size);
+    }
+}
+
+template<size_t log_size>
+void Consensus<log_size>::shutdown() {
+    if (running.exchange(false)) {
+        for (auto &t : threads) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    }
+}
+
+template<size_t log_size>
+Consensus<log_size>::~Consensus() {
+    shutdown();
+}
+
+inline void epoll_write(const int epoll_fd, BufferTracker* tracker) {
+    const auto fd = tracker->get_fd();
+    auto& write_buffer = tracker->get_write_buffer();
+    while (write_buffer.remaining() > 0) {
+        const auto [address, write_size] = write_buffer.next_write();
+        const auto response = write(fd, reinterpret_cast<void *>(address),write_size);
+        if (response == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                epoll_event mod_event{};
+                mod_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                mod_event.data.ptr = static_cast<void*>(tracker);
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &mod_event) < 0) {
+                    close(fd);
+                    throw std::runtime_error("epoll_ctl MOD failed to enable EPOLLOUT");
+                }
+                break;
+            }
+            close(fd);
+            throw std::runtime_error("error writing to socket!");
+        }
+        write_buffer.add_tail(response);
+    }
+}
+
+template<size_t log_size>
+void Consensus<log_size>::epoll_provider(
+    const Algorithm algo,
+    const std::vector<InstanceConfig> &instance_configs,
+    const unsigned int total_pipes,
+    const unsigned int total_connections,
+    const size_t buffer_size
+) {
+    constexpr unsigned int buffer_count = 1000;
+    auto& running_ref = running;
+    for (int thread_id = 0; thread_id < instance_configs.size(); ++thread_id) {
+        threads.emplace_back([&running_ref, total_pipes, &instance_configs, total_connections, thread_id, buffer_size]() {
+            try {
+                const int num_pipes = total_pipes / instance_configs.size();
+                const int num_connections = total_connections / instance_configs.size();
+                const auto&[node_id, host_config, peers] = instance_configs[thread_id];
+                const auto server_fd = setup_server_socket(host_config.host(), host_config.port());
+
+                std::atomic<unsigned int> ops{};
+                std::thread my_thread([&ops, node_id]() {
+                    for (;;) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        unsigned int current_ops = ops.exchange(0, std::memory_order_relaxed);
+                        std::cout << node_id << "Total ops: " << current_ops<< std::endl;
+                    }
+                });
+                my_thread.detach();
+
+                if (!tune_socket(server_fd)) {
+                    close(server_fd);
+                    throw std::runtime_error("Failed to tune server socket");
+                }
+                std::cout << node_id << ": listening on " << host_config.host() << ":" << host_config.port() << " " << server_fd << std::endl;
+
+                const auto epoll_fd = epoll_create1(0);
+                if (epoll_fd < 0) {
+                    throw std::runtime_error("Failed to create epoll descriptor");
+                }
+                epoll_event server_event{};
+                server_event.events = EPOLLIN | EPOLLET;
+                auto* server_tracker = new BufferTracker(buffer_size, 0, 0);
+                server_tracker->set_fd(server_fd);
+                server_event.data.ptr = static_cast<void*>(server_tracker);
+
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event) < 0) {
+                    close(server_fd);
+                    throw std::runtime_error("epoll_ctl ADD failed on server socket");
+                }
+
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+
+                for (const auto &address: peers) {
+                    sockaddr_in server_addr{};
+                    server_addr.sin_family = AF_INET;
+                    server_addr.sin_port = htons(address.port());
+                    inet_pton(AF_INET, address.host().c_str(), &server_addr.sin_addr);
+
+                    for (int i = 0; i < num_connections; i++) {
+                        const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
+                        if (client_fd < 0) {
+                            close(client_fd);
+                            throw std::runtime_error("Failed to create client socket");
+                        }
+                        std::cout << "Creating connection client fd: " << client_fd << std::endl;
+
+                        if (!tune_socket(client_fd)) {
+                            close(client_fd);
+                            throw std::runtime_error("Failed to tune client socket");
+                        }
+
+
+                        auto* client_tracker = new BufferTracker(buffer_size, 0, 0);
+                        client_tracker->set_fd(client_fd);
+
+                        epoll_event client_event{};
+                        client_event.data.ptr = static_cast<void *>(client_tracker);
+                        if (const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr)); result == 0) {
+                            client_event.events = EPOLLIN | EPOLLET;
+                        } else if (result == -1 && errno == EINPROGRESS) {
+                            client_tracker->set_connection_in_progress(true);
+                            client_event.events = EPOLLOUT | EPOLLET;
+                        } else {
+                            close(client_fd);
+                            throw std::runtime_error("Failed to connect");
+                        }
+
+                        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event) < 0) {
+                            close(client_fd);
+                            throw std::runtime_error("epoll_ctl ADD failed on connecting socket");
+                        }
+                    }
+                }
+
+                epoll_event epoll_events[128];
+                while (true) {
+                    const auto n = epoll_wait(epoll_fd, epoll_events, 128, 0);
+                    // std::cout << "Epoll events: " << node_id << " - " << n << std::endl;
+                    for (int event_id = 0; event_id < n; event_id++) {
+                        const auto event = epoll_events[event_id];
+                        auto* tracker = static_cast<BufferTracker*>(event.data.ptr);
+                        auto fd = tracker->get_fd();
+
+                        if (tracker->get_fd() == server_fd) {
+                            while (true) {
+                                sockaddr_in client_addr{};
+                                socklen_t addr_len = sizeof(client_addr);
+                                const auto client_fd = accept(server_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
+                                if (client_fd < 0) {
+                                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                        break;
+                                    }
+                                    throw std::runtime_error("error accepting on server!");
+                                }
+
+                                if (!tune_socket(client_fd)) {
+                                    close(client_fd);
+                                    throw std::runtime_error("failed to tune client socket!");
+                                }
+
+
+                                auto* client_tracker = new BufferTracker(buffer_size, 0, 0);
+                                client_tracker->set_fd(client_fd);
+                                std::cout << node_id << " accepted connection!" << std::endl;
+                                epoll_event client_event{};
+                                client_event.events = EPOLLIN | EPOLLET;
+                                client_event.data.ptr = static_cast<void*>(client_tracker);
+                                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
+
+                                if (node_id == 0) {
+                                    auto &write_buffer = client_tracker->get_write_buffer();
+                                    write_buffer.put<unsigned int>(5);
+                                    write_buffer.put<unsigned char>(0);
+                                    write_buffer.put<unsigned int>(69);
+
+                                    epoll_write(epoll_fd, client_tracker);
+                                    std::cout << "Out of inital write loop" << std::endl;
+                                }
+                            }
+                        } else {
+                            if (event.events & EPOLLERR || event.events & EPOLLHUP || event.events & EPOLLRDHUP) {
+                                std::cout << "FD: " << fd << "Node: " << node_id << "EPOLLERR? " << (event.events & EPOLLERR)
+                                        << " HUP? " << (event.events & EPOLLHUP)
+                                        << " RDHUP? " << (event.events & EPOLLRDHUP)
+                                        << std::endl;
+
+                                int err = 0;
+                                socklen_t len = sizeof(err);
+                                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0) {
+                                    if (err != 0) {
+                                        std::cerr << "Socket error on fd " << fd << ": " << strerror(err) << std::endl;
+                                    }
+                                }
+                                close(fd);
+                                continue;
+                            }
+
+                            if (event.events & EPOLLIN) {
+                                auto& read_buffer = tracker->get_read_buffer();
+                                while (running_ref.load()) {
+                                    const auto [address, read_size] = read_buffer.next_read();
+                                    if (read_size <= 0) {
+                                        throw std::runtime_error("BUFFER OUT OF SPACE ON READ!");
+                                    }
+                                    const auto bytes_read = read(fd, reinterpret_cast<void*>(address), read_size);
+                                    if (bytes_read == -1) {
+                                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                             break;
+                                        }
+                                        close(fd);
+                                        throw std::runtime_error("error reading on socket!");
+                                    }
+
+                                    if (bytes_read == 0) {
+                                        close(fd);
+                                        break;
+                                    }
+                                    read_buffer.add_head(bytes_read);
+
+                                    while (true) {
+                                        if (read_buffer.remaining() < 4) {
+                                            break;
+                                        }
+
+                                        if (const auto payload_size = read_buffer.get<unsigned int>(); read_buffer.remaining() >= payload_size) {
+                                            read_buffer.add_tail(payload_size);
+                                            ops.fetch_add(1, std::memory_order_relaxed);
+                                            auto &write_buffer = tracker->get_write_buffer();
+                                            write_buffer.put<unsigned int>(5);
+                                            write_buffer.put<unsigned char>(0);
+                                            write_buffer.put<unsigned int>(69);
+
+                                            epoll_write(epoll_fd, tracker);
+                                        } else {
+                                            read_buffer.add_tail(-4);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (event.events & EPOLLOUT) {
+                                std::cout << "Epoll out?" << std::endl;
+                                if (tracker->is_connection_in_progress()) {
+                                    int err = 0;
+                                    socklen_t len = sizeof(err);
+                                    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+                                        close(fd);
+                                        throw std::runtime_error("failed to connect socket error!");
+                                    }
+
+                                    epoll_event next_event{};
+                                    next_event.events = EPOLLIN | EPOLLET;
+                                    next_event.data.ptr = event.data.ptr;
+
+                                    std::cout << node_id << " completed connection!" << std::endl;
+
+                                    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &next_event) < 0) {
+                                        close(fd);
+                                        throw std::runtime_error("epoll_ctl MOD failed after connect");
+                                    }
+
+                                    tracker->set_connection_in_progress(false);
+                                } else {
+                                    std::cout << "Are we writing out here?" << std::endl;
+                                    auto &write_buffer = tracker->get_write_buffer();
+                                    while (write_buffer.remaining() > 0) {
+                                        const auto [address, write_size] = write_buffer.next_write();
+                                        const auto response = write(fd, reinterpret_cast<void *>(address), write_size);
+                                        if (response == -1) {
+                                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                                break;
+                                            }
+                                            close(fd);
+                                            throw std::runtime_error("error writing to socket!");
+                                        }
+                                        write_buffer.add_tail(response);
+                                    }
+
+                                    if (write_buffer.remaining() == 0) {
+                                        epoll_event next_event{};
+                                        next_event.events = EPOLLIN | EPOLLET;
+                                        next_event.data.ptr = event.data.ptr;
+                                        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &next_event) < 0) {
+                                            close(fd);
+                                            throw std::runtime_error("epoll_ctl MOD failed after write");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (std::exception &e) {
+                std::cerr << "Exception thrown: " << e.what() << std::endl;
+            }
+        });
+    }
+}
 
 struct IoUringContext {
     int ring_fd = -1;
@@ -339,7 +571,9 @@ struct IoUringContext {
         params = std::make_unique<io_uring_params>();
         std::memset(params.get(), 0, sizeof(io_uring_params));
         params->flags |= IORING_SETUP_SQPOLL;
+        // | IORING_SETUP_SQ_AFF;
         params->sq_thread_idle = 1000000;
+        // params->sq_thread_cpu = node_id + 2;
 
         ring_fd = io_uring_setup(sq_entries, params.get());
         if (ring_fd < 0) {
@@ -533,7 +767,8 @@ struct IoUringContext {
         while (true) {
             if (read_buffer.remaining() >= 4) {
                 if (const auto amount = read_buffer.get<unsigned int>(); read_buffer.remaining() >= amount) {
-                    submit_write(fd, conn_index, tracker);
+                    std::cout << "Got packet with size: " << amount << std::endl;
+                    // submit_write(fd, conn_index, tracker);
                 } else {
                     read_buffer.add_tail(-4);
                     break;
@@ -583,7 +818,6 @@ struct IoUringContext {
 
 template<size_t log_size>
 void Consensus<log_size>::io_uring_provider(
-    int id,
     const Algorithm algo,
     const std::vector<InstanceConfig> &instance_configs,
     const unsigned int total_pipes,
@@ -594,14 +828,13 @@ void Consensus<log_size>::io_uring_provider(
 
     for (int thread_id = 0; thread_id < static_cast<int>(instance_configs.size()); ++thread_id) {
         threads.emplace_back(
-            [thread_id, &instance_configs, total_pipes, total_connections, buffer_size, &running_ref, id]() {
-                const int num_pipes = total_pipes / instance_configs.size();
-                const int num_connections = total_connections / instance_configs.size();
-                const auto&[host_config, peers] = instance_configs[thread_id];
-
+            [thread_id, &instance_configs, total_pipes, total_connections, buffer_size, &running_ref]() {
                 try {
+                    const int num_pipes = total_pipes / instance_configs.size();
+                    const int num_connections = total_connections / instance_configs.size();
+                    const auto&[node_id, host_config, peers] = instance_configs[thread_id];
                     const auto context = std::make_shared<IoUringContext>();
-                    context->initialize(buffer_size, 1024, id);
+                    context->initialize(buffer_size, 1024, node_id);
 
                     sockaddr_in server_addr{};
                     server_addr.sin_family = AF_INET;
@@ -614,7 +847,6 @@ void Consensus<log_size>::io_uring_provider(
                     socklen_t cli_addr_len = sizeof(cli_in_addr);
                     context->submit_accept(server_fd, cli_in_addr, cli_addr_len);
 
-
                     for (const auto &peer_address: peers) {
                         std::cout << "Gonna connect from: " << host_config.host() << ":" << host_config.port() << " to " << peer_address.host() << ":"  << peer_address.port()<< std::endl;
                         sockaddr_in target_addr{};
@@ -625,6 +857,10 @@ void Consensus<log_size>::io_uring_provider(
 
                         for (int i = 0; i < num_connections; i++) {
                             const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
+                            if (client_fd < 0) {
+                                throw std::runtime_error("Error creating client");
+                            }
+
                             if (!tune_socket(client_fd)) {
                                 throw std::runtime_error("client tune_socket failed");
                             }

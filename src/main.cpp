@@ -22,6 +22,7 @@ int main() {
 
     const std::vector instance_configs0{
         InstanceConfig{
+            .node_id = 0,
             .host_config = Address { "127.0.0.1", 6969},
             .peers = std::vector {
                 Address { "127.0.0.1", 6970 }
@@ -31,6 +32,7 @@ int main() {
 
     const std::vector instance_configs1{
         InstanceConfig{
+            .node_id = 1,
             .host_config = Address { "127.0.0.1", 6970 },
             .peers = std::vector {
                 Address{ "127.0.0.1", 6969 }
@@ -38,8 +40,8 @@ int main() {
         }
     };
 
-   Consensus<256> node0(0, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs0, 1, 1, 1000000);
-   Consensus<256> node1(1, IOType::IO_URING, Algorithm::MULTI_PAXOS, instance_configs1, 1, 1, 1000000);
+  Consensus<256> node0(IOType::EPOLL, Algorithm::MULTI_PAXOS, instance_configs0, 1, 1, 10000);
+   Consensus<256> node1(IOType::EPOLL, Algorithm::MULTI_PAXOS, instance_configs1, 1, 1, 10000);
 
 
     while (RUNNING.load()) {

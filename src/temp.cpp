@@ -132,6 +132,10 @@ int setup_server_socket(const std::string& address, const unsigned short port) {
     constexpr int opt = 1;
     const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
+    if (server_fd < 0) {
+        throw std::runtime_error("server socket failed: " + std::string(std::strerror(errno)));
+    }
+
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     if (!tune_socket(server_fd)) {
