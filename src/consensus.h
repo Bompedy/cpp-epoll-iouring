@@ -29,16 +29,7 @@ class Address {
 public:
     Address(std::string host, const unsigned short port) : host_(std::move(host)), port_(port) {}
     const std::string& host() const { return host_; }
-    unsigned short port() const { return port_; }
-};
-
-struct InstanceConfig {
-    unsigned int node_id;
-    unsigned int num_conn_per_peer;
-    unsigned int active_conn = 0;
-    unsigned int pipes;
-    Address host_config;
-    std::vector<Address> peers;
+    [[nodiscard]] unsigned short port() const { return port_; }
 };
 
 template<size_t log_size>
@@ -53,6 +44,7 @@ class Consensus {
     void epoll_provider(
         Algorithm algo,
         unsigned int num_instances,
+        unsigned int leader_id,
         unsigned int node_id,
         unsigned int num_conn_per_peer,
         unsigned int pipes_per_instance,
@@ -74,6 +66,7 @@ public:
         IOType io_type,
         Algorithm algo,
         unsigned int num_instances,
+        unsigned int leader_id,
         unsigned int node_id,
         unsigned int num_conn_per_peer,
         unsigned int pipes_per_instance,

@@ -136,20 +136,31 @@ private:
 
 class BufferTracker {
     bool write_in_progress = false;
+    unsigned int peer_id;
     bool connection_in_progress = false;
     int fd = 0;
     RingBuffer read_buffer;
     unsigned int write_buffer_index, read_buffer_index;
     RingBuffer write_buffer;
 public:
-    BufferTracker(const size_t buffer_capacity, const unsigned int read_buffer_index, const unsigned int write_buffer_index)
-        : read_buffer(buffer_capacity),
+    BufferTracker(const size_t buffer_capacity, const unsigned int read_buffer_index,
+                  const unsigned int write_buffer_index, const unsigned int peer_id)
+        : peer_id(peer_id),
+          read_buffer(buffer_capacity),
           write_buffer_index(write_buffer_index),
           read_buffer_index(read_buffer_index),
           write_buffer(buffer_capacity) {
     }
 
-    int get_fd() const {
+    void set_peer_id(const unsigned int peer_id) {
+        this->peer_id = peer_id;
+    }
+
+    [[nodiscard]] unsigned int get_peer_id() const {
+        return peer_id;
+    }
+
+    [[nodiscard]] int get_fd() const {
         return fd;
     }
 
@@ -196,11 +207,40 @@ inline void log_safe(const std::string& message) {
     std::cout << message << std::endl;
 }
 
+constexpr unsigned char OP_NODE_ID = 0;
+constexpr unsigned char OP_PROPOSE = 1;
+constexpr unsigned char OP_ACK = 2;
+
+inline void node_id_packet(BufferTracker* tracker, const unsigned int peer_id) {
+    auto &buffer = tracker->get_write_buffer();
+    buffer.put<unsigned int>(5);
+    buffer.put<unsigned char>(OP_NODE_ID);
+    buffer.put<unsigned int>(peer_id);
+}
+
+inline void propose_packet(BufferTracker* tracker, const unsigned int slot, const unsigned int next, const char *bytes, const unsigned int size) {
+    auto &buffer = tracker->get_write_buffer();
+    buffer.put<unsigned int>(13 + size);
+    buffer.put<unsigned char>(OP_PROPOSE);
+    buffer.put<unsigned int>(slot);
+    buffer.put<unsigned int>(next);
+    buffer.put<unsigned int>(size);
+    if (size > 0) buffer.put_bytes(bytes, size);
+}
+
+inline void ack_packet(BufferTracker* tracker, const unsigned int slot) {
+    auto &buffer = tracker->get_write_buffer();
+    buffer.put<unsigned int>(5);
+    buffer.put<unsigned char>(OP_ACK);
+    buffer.put<unsigned int>(slot);
+}
+
 template<size_t log_size>
 Consensus<log_size>::Consensus(
     const IOType io_type,
     const Algorithm algo,
     const unsigned int num_instances,
+    const unsigned int leader_id,
     const unsigned int node_id,
     const unsigned int num_conn_per_peer,
     const unsigned int pipes_per_instance,
@@ -212,29 +252,29 @@ Consensus<log_size>::Consensus(
         log[i] = std::make_unique<char[]>(buffer_size);
     }
 
-    // threads.emplace_back([this] {
-    //     try {
-    //         while (running.load()) {
-    //             const auto current_commit = committed.load();
-    //             const auto current_consume = consumed.load();
-    //
-    //             if (current_consume < current_commit) {
-    //                 const auto next = current_consume + 1;
-    //                 std::cout << "Consuming log index: " << next << std::endl;
-    //                 acks[next % log_size].store(0);
-    //                 consumed.store(next);
-    //             } else {
-    //                 std::this_thread::yield();
-    //             }
-    //         }
-    //     } catch (const std::exception &e) {
-    //         std::cerr << "Exception thrown: " << e.what() << std::endl;
-    //         shutdown();
-    //     }
-    // });
+    threads.emplace_back([this] {
+        try {
+            while (running.load()) {
+                const auto current_commit = committed.load();
+                const auto current_consume = consumed.load();
+
+                if (current_consume < current_commit) {
+                    const auto next = current_consume + 1;
+                    std::cout << "Consuming log index: " << next << std::endl;
+                    acks[next % log_size].store(0);
+                    consumed.store(next);
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Exception thrown: " << e.what() << std::endl;
+            shutdown();
+        }
+    });
 
     if (io_type == IOType::EPOLL) {
-        epoll_provider(algo, num_instances, node_id, num_conn_per_peer, pipes_per_instance, peers, buffer_size);
+        epoll_provider(algo, num_instances, leader_id, node_id, num_conn_per_peer, pipes_per_instance, peers, buffer_size);
     } else if (io_type == IOType::IO_URING) {
         io_uring_provider(algo, num_instances, node_id, num_conn_per_peer, pipes_per_instance, peers, buffer_size);
     }
@@ -284,6 +324,7 @@ template<size_t log_size>
 void Consensus<log_size>::epoll_provider(
     const Algorithm algo,
     const unsigned int num_instances,
+    const unsigned int leader_id,
     const unsigned int node_id,
     const unsigned int num_conn_per_peer,
     const unsigned int pipes_per_instance,
@@ -292,8 +333,14 @@ void Consensus<log_size>::epoll_provider(
 ) {
     auto& running_ref = running;
     for (int thread_id = 0; thread_id < num_instances; ++thread_id) {
-        threads.emplace_back([&running_ref, thread_id, buffer_size, node_id, &peers, num_instances, num_conn_per_peer]() {
+        threads.emplace_back([&running_ref, thread_id, buffer_size, node_id, &peers, num_instances, num_conn_per_peer, pipes_per_instance, leader_id]() {
             try {
+                const auto total_nodes = peers.size() / num_instances;
+                const auto majority = (total_nodes / 2) + 1;
+                std::vector<std::vector<BufferTracker*>> trackers{};
+                trackers.reserve(total_nodes);
+                for (auto i = 0; i < total_nodes; ++i) trackers.emplace_back();
+
                 const auto instance_id = node_id*num_instances+thread_id;
                 const auto& host_address = peers[instance_id];
                 const auto server_fd = setup_server_socket(host_address.host(), host_address.port());
@@ -310,7 +357,7 @@ void Consensus<log_size>::epoll_provider(
                 }
                 epoll_event server_event{};
                 server_event.events = EPOLLIN | EPOLLET;
-                auto* server_tracker = new BufferTracker(buffer_size, 0, 0);
+                auto* server_tracker = new BufferTracker(buffer_size, 0, 0, 0);
                 server_tracker->set_fd(server_fd);
                 server_event.data.ptr = static_cast<void*>(server_tracker);
 
@@ -322,23 +369,14 @@ void Consensus<log_size>::epoll_provider(
                 std::this_thread::sleep_for(std::chrono::seconds(2));
 
 
-                for (unsigned int i = 0; i < peers.size() / num_instances; ++i) {
-                    if (i == node_id) continue;
-                    unsigned int peer_instance_id = i * num_instances + thread_id;
+                for (unsigned int peer_id = 0; peer_id < peers.size() / num_instances; ++peer_id) {
+                    if (peer_id == node_id) continue;
+                    unsigned int peer_instance_id = peer_id * num_instances + thread_id;
                     const auto &peer_address = peers[peer_instance_id];
                     sockaddr_in server_addr{};
                     server_addr.sin_family = AF_INET;
                     server_addr.sin_port = htons(peer_address.port());
                     inet_pton(AF_INET, peer_address.host().c_str(), &server_addr.sin_addr);
-
-                    log_safe(std::to_string(node_id) +
-                             " Connecting from " +
-                             host_address.host() + ":" +
-                             std::to_string(host_address.port()) +
-                             " to " +
-                             peer_address.host() + ":" +
-                             std::to_string(peer_address.port())
-                    );
 
                     for (int j = 0; j < num_conn_per_peer; j++) {
                         const auto client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -352,17 +390,21 @@ void Consensus<log_size>::epoll_provider(
                             throw std::runtime_error("Failed to tune client socket");
                         }
 
-
-                        auto *client_tracker = new BufferTracker(buffer_size, 0, 0);
-                        client_tracker->set_fd(client_fd);
+                        auto *tracker = new BufferTracker(buffer_size, 0, 0, peer_id);
+                        tracker->set_fd(client_fd);
 
                         epoll_event client_event{};
-                        client_event.data.ptr = static_cast<void *>(client_tracker);
+                        client_event.data.ptr = static_cast<void *>(tracker);
                         if (const auto result = connect(client_fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr)); result == 0) {
-                            // connection made
+                            trackers[peer_id].push_back(tracker);
+                            node_id_packet(tracker, tracker->get_peer_id());
+                            epoll_write(epoll_fd, tracker);
+                            if (num_conn_per_peer == trackers[peer_id].size()) {
+                                std::cout << "node=" << node_id  << " instance=" << instance_id  << " starting consensus!" << std::endl;
+                            }
                             client_event.events = EPOLLIN | EPOLLET;
                         } else if (result == -1 && errno == EINPROGRESS) {
-                            client_tracker->set_connection_in_progress(true);
+                            tracker->set_connection_in_progress(true);
                             client_event.events = EPOLLOUT | EPOLLET;
                         } else {
                             close(client_fd);
@@ -403,14 +445,12 @@ void Consensus<log_size>::epoll_provider(
                                 }
 
 
-                                auto* client_tracker = new BufferTracker(buffer_size, 0, 0);
+                                auto* client_tracker = new BufferTracker(buffer_size, 0, 0, 0);
                                 client_tracker->set_fd(client_fd);
                                 epoll_event client_event{};
                                 client_event.events = EPOLLIN | EPOLLET;
                                 client_event.data.ptr = static_cast<void*>(client_tracker);
                                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
-
-                                log_safe(std::to_string(node_id) + " Accepted connection on: " + host_address.host() + ":" + std::to_string(host_address.port()));
 
                             }
                         } else {
@@ -459,7 +499,48 @@ void Consensus<log_size>::epoll_provider(
                                         }
 
                                         if (const auto payload_size = read_buffer.get<unsigned int>(); read_buffer.remaining() >= payload_size) {
-                                            read_buffer.add_tail(payload_size);
+                                            switch (const auto opcode = read_buffer.get<unsigned char>()) {
+                                                case OP_NODE_ID: {
+                                                    const auto peer_id = read_buffer.get<unsigned short>();
+                                                    tracker->set_peer_id(peer_id);
+                                                    break;
+                                                }
+                                                case OP_PROPOSE: {
+                                                    const auto slot = read_buffer.get<unsigned int>();
+                                                    const auto next = read_buffer.get<unsigned int>();
+                                                    const auto message_size = read_buffer.get<unsigned int>();
+                                                    if (message_size > 0) {
+                                                        std::cout << "Got message with bytes!" << std::endl;
+                                                        read_buffer.add_tail(message_size);
+                                                        // idk do something with bytes
+                                                    } else {
+                                                        std::cout << "Got empty message!" << std::endl;
+                                                        log[slot] = nullptr;
+                                                    }
+
+                                                    ack_packet(tracker, slot);
+                                                    epoll_write(epoll_fd, tracker);
+                                                    break;
+                                                }
+                                                case OP_ACK: {
+                                                    const auto slot = read_buffer.get<unsigned int>();
+                                                    const auto previous = acks[slot].fetch_add(1);
+                                                    if (previous - 1 == majority) {
+                                                        auto current = committed.load();
+                                                        auto next = current;
+                                                        for (int i = )
+
+                                                        // try walk up, commit as much as you can
+
+                                                        //
+                                                    }
+                                                    break;
+                                                }
+                                                default:
+                                                    throw std::runtime_error("invalid opcode " + std::to_string(opcode));
+                                                    break;
+                                            }
+
                                         } else {
                                             read_buffer.add_tail(-4);
                                             break;
@@ -486,9 +567,23 @@ void Consensus<log_size>::epoll_provider(
                                         throw std::runtime_error("epoll_ctl MOD failed after connect");
                                     }
 
-                                    // connection made
-
                                     tracker->set_connection_in_progress(false);
+                                    trackers[tracker->get_peer_id()].push_back(tracker);
+
+                                    node_id_packet(tracker, tracker->get_peer_id());
+                                    epoll_write(epoll_fd, tracker);
+
+                                    if (num_conn_per_peer == trackers[tracker->get_peer_id()].size() && node_id == leader_id) {
+                                        log_safe(std::to_string(node_id) + " is the leader starting pipes!");
+                                        for (unsigned int peer_id; peer_id < trackers.size(); ++peer_id) {
+                                            if (peer_id != node_id) {
+                                                for (unsigned int pipe = 0; pipe < pipes_per_instance; ++pipe) {
+                                                    propose_packet(trackers[peer_id][0], );
+
+                                                }
+                                            }
+                                        }
+                                    }
                                 } else {
                                     auto &write_buffer = tracker->get_write_buffer();
                                     while (write_buffer.remaining() > 0) {
@@ -605,7 +700,7 @@ struct IoUringContext {
         trackers.resize(buffer_count);
         io_vecs.resize(buffer_count * 2);
         for (int i = 0; i < buffer_count; ++i) {
-            trackers[i] = std::make_unique<BufferTracker>(buffer_size, i, i+buffer_count);
+            trackers[i] = std::make_unique<BufferTracker>(buffer_size, i, i+buffer_count, 0);
             auto& tracker = *trackers[i];
             io_vecs[i].iov_base = tracker.get_read_buffer().get_data();
             io_vecs[i].iov_len = buffer_size;
