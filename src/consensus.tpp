@@ -333,7 +333,7 @@ void Consensus<log_size>::epoll_provider(
 ) {
     auto& running_ref = running;
     for (int thread_id = 0; thread_id < num_instances; ++thread_id) {
-        threads.emplace_back([&running_ref, thread_id, buffer_size, node_id, &peers, num_instances, num_conn_per_peer, pipes_per_instance, leader_id]() {
+        threads.emplace_back([&running_ref, thread_id, buffer_size, node_id, &peers, num_instances, num_conn_per_peer, pipes_per_instance, leader_id, this]() {
             try {
                 const auto total_nodes = peers.size() / num_instances;
                 const auto majority = (total_nodes / 2) + 1;
@@ -528,11 +528,12 @@ void Consensus<log_size>::epoll_provider(
                                                     if (previous - 1 == majority) {
                                                         auto current = committed.load();
                                                         auto next = current;
-                                                        for (int i = )
+                                                        // walk up and commit
 
-                                                        // try walk up, commit as much as you can
-
-                                                        //
+                                                        if (!next_slot.isReady) {
+                                                            while (acks->load() != 0);
+                                                        }
+                                                        propose_packet(next_slot);
                                                     }
                                                     break;
                                                 }

@@ -28,7 +28,7 @@ class Address {
     }
 public:
     Address(std::string host, const unsigned short port) : host_(std::move(host)), port_(port) {}
-    const std::string& host() const { return host_; }
+    [[nodiscard]] const std::string& host() const { return host_; }
     [[nodiscard]] unsigned short port() const { return port_; }
 };
 
