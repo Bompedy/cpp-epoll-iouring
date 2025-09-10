@@ -5,7 +5,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include <sys/epoll.h>
 #include "temp.h"
 
 
@@ -43,21 +42,20 @@ class Consensus {
 
     void epoll_provider(
         Algorithm algo,
-        unsigned int num_instances,
-        unsigned int leader_id,
-        unsigned int node_id,
-        unsigned int num_conn_per_peer,
-        unsigned int pipes_per_instance,
+        unsigned int instances,
+        unsigned char leader_id,
+        unsigned char node_id,
+        unsigned int pipes,
         const std::vector<Address> &peers,
         size_t buffer_size
     );
 
     void io_uring_provider(
         Algorithm algo,
-        unsigned int num_instances,
-        unsigned int node_id,
-        unsigned int num_conn_per_peer,
-        unsigned int pipes_per_instance,
+        unsigned int instances,
+        unsigned char leader_id,
+        unsigned char node_id,
+        unsigned int pipes,
         const std::vector<Address> &peers,
         size_t buffer_size
     );
@@ -65,11 +63,10 @@ public:
     Consensus(
         IOType io_type,
         Algorithm algo,
-        unsigned int num_instances,
-        unsigned int leader_id,
-        unsigned int node_id,
-        unsigned int num_conn_per_peer,
-        unsigned int pipes_per_instance,
+        unsigned int instances,
+        unsigned char leader_id,
+        unsigned char node_id,
+        unsigned int pipes,
         const std::vector<Address> &peers,
         size_t buffer_size
     );

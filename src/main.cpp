@@ -21,23 +21,21 @@ int main() {
     sigaction(SIGHUP,  &action, nullptr);
 
 
-    constexpr unsigned int num_conn_per_peer = 1;
-    constexpr unsigned int pipes_per_instance = 1;
-    constexpr unsigned int num_instances = 1;
-    const std::vector peer_addrs{
+    constexpr unsigned int pipes = 1;
+    constexpr unsigned int instances = 1;
+    const std::vector peers{
         Address{ "127.0.0.1", 6969 },
         // Address{ "127.0.0.1", 6970 },
 
-        Address{ "127.0.0.1", 6971 }
+        Address{ "127.0.0.1", 6971 },
         // Address{ "127.0.0.1", 6972 }
     };
 
-    const auto nodes = peer_addrs.size() / num_instances;
+    const auto nodes = peers.size() / instances;
     std::cout << "N=" << nodes << std::endl;
 
-
-   Consensus<256> node0(IOType::EPOLL, Algorithm::MULTI_PAXOS, num_instances, 0, 0, num_conn_per_peer, pipes_per_instance, peer_addrs, 10000);
-   Consensus<256> node1(IOType::EPOLL, Algorithm::MULTI_PAXOS, num_instances, 0, 1, num_conn_per_peer, pipes_per_instance, peer_addrs, 10000);
+    Consensus<256> node0(IOType::EPOLL, Algorithm::MULTI_PAXOS, instances, 0, 0, pipes, peers, 100000);
+    Consensus<256> node1(IOType::EPOLL, Algorithm::MULTI_PAXOS, instances, 0, 1, pipes, peers, 100000);
    while (RUNNING.load()) {
        pause();
    }

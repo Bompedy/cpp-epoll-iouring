@@ -56,9 +56,9 @@ int io_uring_register(
 
 bool tune_socket(
     const int fd,
-    const unsigned int buffer_size,
-    const bool quick_ack,
-    const bool no_delay
+    const unsigned int buffer_size
+    // const bool quick_ack,
+    // const bool no_delay
 ) {
     // Set non-blocking
     const auto flags = fcntl(fd, F_GETFL, 0);
@@ -84,22 +84,22 @@ bool tune_socket(
     }
 
     // Set TCP_NODELAY (disable Nagle's)
-    if (no_delay) {
-        const int flag = 1;
-        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
-            perror("setsockopt TCP_NODELAY failed");
-            return false;
-        }
-    }
-
-    // Set TCP_QUICKACK (disable delayed ACKs)
-    if (quick_ack) {
-        const int flag = 1;
-        if (setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &flag, sizeof(flag)) < 0) {
-            perror("setsockopt TCP_QUICKACK failed");
-            return false;
-        }
-    }
+    // if (no_delay) {
+    //     const int flag = 1;
+    //     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+    //         perror("setsockopt TCP_NODELAY failed");
+    //         return false;
+    //     }
+    // }
+    //
+    // // Set TCP_QUICKACK (disable delayed ACKs)
+    // if (quick_ack) {
+    //     const int flag = 1;
+    //     if (setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &flag, sizeof(flag)) < 0) {
+    //         perror("setsockopt TCP_QUICKACK failed");
+    //         return false;
+    //     }
+    // }
 
     return true;
 }
@@ -128,15 +128,25 @@ void pin_thread_to_core(const int core_id) {
 }
 
 
-int setup_server_socket(const std::string& address, const unsigned short port) {
+int setup_server_socket(const std::string& address, const unsigned short port, const char* multicast_addr) {
     constexpr int opt = 1;
-    const auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    const auto server_fd = socket(AF_INET, SOCK_DGRAM, 0);
 
     if (server_fd < 0) {
         throw std::runtime_error("server socket failed: " + std::string(std::strerror(errno)));
     }
 
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    // Disable loopback immediately after socket creation
+    constexpr unsigned char loop = 0;  // Disable loopback
+    if (setsockopt(server_fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
+        close(server_fd);
+        throw std::runtime_error("Failed to disable multicast loopback");
+    }
+
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        close(server_fd);
+        throw std::runtime_error("Failed to set reuseport to socket");
+    }
 
     if (!tune_socket(server_fd)) {
         close(server_fd);
@@ -145,16 +155,30 @@ int setup_server_socket(const std::string& address, const unsigned short port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    inet_pton(AF_INET, address.c_str(), &addr.sin_addr);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);  // bind to all interfaces
     addr.sin_port = htons(port);
 
     if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
         close(server_fd);
         throw std::runtime_error("Failed to bind to port " + std::to_string(port));
     }
-    if (listen(server_fd, SOMAXCONN) < 0) {
+
+    // Join multicast group
+    ip_mreq mreq{};
+    inet_pton(AF_INET, multicast_addr, &mreq.imr_multiaddr);
+    inet_pton(AF_INET, "127.0.0.1", &mreq.imr_interface);  // loopback interface
+
+    if (setsockopt(server_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
         close(server_fd);
-        throw std::runtime_error("Failed to listen on port " + std::to_string(port));
+        throw std::runtime_error("Failed to add membership to socket");
+    }
+
+    // Set multicast interface (loopback)
+    in_addr local_interface{};
+    inet_pton(AF_INET, "127.0.0.1", &local_interface);
+    if (setsockopt(server_fd, IPPROTO_IP, IP_MULTICAST_IF, &local_interface, sizeof(local_interface)) < 0) {
+        close(server_fd);
+        throw std::runtime_error("Failed to set multicast interface");
     }
 
     return server_fd;
