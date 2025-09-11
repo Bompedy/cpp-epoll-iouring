@@ -213,7 +213,6 @@ void client(
             cli_addr.sin_port = htons(leader.port());
             socklen_t addr_len = sizeof(cli_addr);
             auto* client_sockaddr = reinterpret_cast<sockaddr*>(&cli_addr);
-
             char buffer[data_size];
 
             if (inet_pton(AF_INET, leader.host().c_str(), &cli_addr.sin_addr) <= 0) {
