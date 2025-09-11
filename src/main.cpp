@@ -275,7 +275,6 @@ void node(
             // std::unordered_map<std::string, char*> storage{};
             auto acks = new unsigned char[log_size];
 
-
             const auto quorum = (peers.size() / 2) + 1;
             const auto &address = peers[node_id];
             const auto server_fd = setup_server_socket(address.host(), address.port());
@@ -390,6 +389,14 @@ void node(
     });
 }
 
+long time_millis() {
+    auto now = std::chrono::system_clock::now();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()
+    ).count();
+    return millis;
+}
+
 void client(
     const Address& leader,
     const unsigned int connections,
@@ -399,16 +406,23 @@ void client(
 ) {
     const auto ops_per_conn = ops / connections;
     auto completed_connections = std::make_shared<std::atomic<int>>(0);
+    auto send_times = std::make_shared<std::vector<long>>();
+    auto start = std::make_shared<long>(0);
 
-    workers.emplace_back([completed_connections, connections]() {
+    workers.emplace_back([completed_connections, connections, ops, data_size, start]() {
         while (completed_connections->load() != connections) {
             std::this_thread::yield();
         }
-        std::cout << "All connections completed!" << std::endl;
+        auto end = time_millis();
+        auto seconds = (float)(end-*start) / 1e3f;
+        auto mbps = (((float) ops * (float) (data_size * 8)) / 1e6f) / seconds;
+        auto ops_per_second = (float) ops / seconds;
+        std::cout << "Update - Count(" << ops << ") OPS(" << ops_per_second << ") Seconds(" << seconds << ") Throughput(" << mbps << " Mbps)" << std::endl;
     });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
+    std::cout << "Started" << std::endl;
+    *start = time_millis();
     for (unsigned int i = 0; i < connections; i++) {
         workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn]() {
             auto completed_ops = 0;
@@ -447,7 +461,11 @@ void client(
                 }
                 if (const auto size = recvfrom(client_fd, read_buffer, data_size+20, 0, client_sockaddr, &addr_len); size > 0) {
                     if (read_buffer[0] == OP_CLIENT_RESPONSE) {
-                        if (++completed_ops >= ops_per_conn) {
+                        ++completed_ops;
+                        if (completed_ops % 10000 == 0) {
+                            std::cout << completed_ops << std::endl;
+                        }
+                        if (completed_ops >= ops_per_conn) {
                             // std::cout << "Incrementing completed" << std::endl;
                             completed_connections->fetch_add(1);
                             break;
@@ -489,24 +507,20 @@ int main() {
         //     // const auto address = getEnvAddress("ADDRESS");
         //     // const auto peers = getEnvPeers("PEERS");
         //     // node(node_id, is_leader, address, peers, workers);
-        //
         // }
 
-        // std::cout << "Creating addresses" << std::endl;
         std::vector<Address> peers = {
             Address { "127.0.0.1", 6969},
             Address { "127.0.0.1", 6970},
             Address { "127.0.0.1", 6971}
         };
-        // std::cout << "Made addresses" << std::endl;
 
         node(0, true, peers, workers);
-        // std::cout << "Made node" << std::endl;
         node(1, false, peers, workers);
         node(2, false, peers, workers);
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
-        client(Address { "127.0.0.1", 6969 }, 3, 10000, 1, workers);
+        client(Address { "127.0.0.1", 6969 }, 4, 100000, 1, workers);
 
         while (RUNNING.load()) {
             pause();
