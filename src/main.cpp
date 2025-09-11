@@ -160,6 +160,15 @@ Address getEnvAddress(const char* env_var_name) {
     return Address{host, port};
 }
 
+constexpr unsigned char OP_CLIENT_REQUEST = 0;
+constexpr unsigned char OP_CLIENT_RESPONSE = 1;
+constexpr unsigned char OP_PROPOSE = 2;
+constexpr unsigned char OP_ACK = 3;
+constexpr unsigned char OP_COMMIT = 4;
+
+constexpr unsigned char REQUEST_WRITE = 0;
+constexpr unsigned char REQUEST_READ = 1;
+
 void node(
     const unsigned char node_id,
     const bool is_leader,
@@ -186,8 +195,26 @@ void node(
                     consumed++;
                 }
 
-                if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len); size > 0) {
+                if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len);
+                    size > 0) {
+                    const auto op = buffer[0];
+                    switch (op) {
+                        case OP_CLIENT_REQUEST: {
+                            break;
+                        }
+                        case OP_CLIENT_RESPONSE: {
+                            break;
+                        }
 
+                        case OP_PROPOSE: {
+                            break;
+                        }
+                        case OP_ACK: {
+                            break;
+                        }
+
+                        default: { throw std::runtime_error("Invalid operation"); }
+                    }
                 }
             }
 
@@ -228,7 +255,12 @@ void client(
                     wrote = true;
                 }
                 if (const auto size = recvfrom(client_fd, buffer, data_size, 0, client_sockaddr, &addr_len); size > 0) {
-
+                    const auto op = buffer[0];
+                    if (op == OP_CLIENT_RESPONSE) {
+                        wrote = false;
+                    } else {
+                        throw std::runtime_error("Invalid client response");
+                    }
                 }
             }
         });
