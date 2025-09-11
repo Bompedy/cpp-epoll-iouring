@@ -1,46 +1,282 @@
+#include <atomic>
 #include <csignal>
+#include <cstring>
 #include <iostream>
+#include <sstream>
 #include <vector>
-#include "consensus.h"
+#include <arpa/inet.h>
+#include <bits/std_thread.h>
+#include <bits/this_thread_sleep.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+
+
+// #include "consensus.h"
+// #include "temp.h"
+
 
 std::atomic RUNNING { true };
+
+class Address {
+    std::string host_;
+    unsigned short port_;
+
+    bool operator==(const Address& other) const {
+        return host_ == other.host_ && port_ == other.port_;
+    }
+public:
+    Address(std::string host, const unsigned short port) : host_(std::move(host)), port_(port) {}
+    [[nodiscard]] const std::string& host() const { return host_; }
+    [[nodiscard]] unsigned short port() const { return port_; }
+};
+
+bool tune_socket(
+    const int fd,
+    const unsigned int buffer_size
+    ) {
+    const auto flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl F_GETFL");
+        return false;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("fcntl F_SETFL O_NONBLOCK");
+        return false;
+    }
+
+    // Set send buffer size
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+        perror("setsockopt SO_SNDBUF failed");
+        return false;
+    }
+
+    // Set receive buffer size
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+        perror("setsockopt SO_RCVBUF failed");
+        return false;
+    }
+
+    return true;
+}
+
+int setup_server_socket(const std::string& address, const unsigned short port) {
+    constexpr int opt = 1;
+    const auto server_fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (server_fd < 0) {
+        throw std::runtime_error("server socket failed: " + std::string(std::strerror(errno)));
+    }
+
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        close(server_fd);
+        throw std::runtime_error("Failed to set reuseport to socket");
+    }
+
+    const auto flags = fcntl(server_fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl F_GETFL");
+        return false;
+    }
+
+    if (!tune_socket(server_fd, 1024 * 4 * 4)) {
+        close(server_fd);
+        throw std::runtime_error("Failed to create tune socket");
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, address.c_str(), &addr.sin_addr) <= 0) {
+        close(server_fd);
+        throw std::runtime_error("Invalid address: " + address);
+    }
+
+    if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+        close(server_fd);
+        throw std::runtime_error("Failed to bind to port " + std::to_string(port));
+    }
+
+    return server_fd;
+}
 
 void shutdown(const int signum) {
     std::cout << "Received signal: " << signum << std::endl;
     RUNNING.store(false);
 }
 
+unsigned int getEnvUInt(const char* name) {
+    const char* val = std::getenv(name);
+    if (!val) throw std::runtime_error("Environment variable " + std::string(name) + " is not set");
+
+    try {
+        return static_cast<unsigned int>(std::stoul(val));
+    } catch (...) {
+        throw std::invalid_argument(std::string("Invalid uint for env var: ") + name);
+    }
+}
+
+std::vector<Address> getEnvPeers(const char* env_var_name) {
+    const char* val = std::getenv(env_var_name);
+    if (!val) {
+        throw std::runtime_error(std::string("Missing required environment variable: ") + env_var_name);
+    }
+
+    std::string str(val);
+    std::vector<Address> peers;
+    std::stringstream ss(str);
+    std::string item;
+
+    while (std::getline(ss, item, ',')) {
+        auto pos = item.find(':');
+        if (pos == std::string::npos || pos == 0 || pos == item.length() - 1) {
+            throw std::invalid_argument("Invalid peer address format: " + item);
+        }
+
+        std::string host = item.substr(0, pos);
+        unsigned short port = static_cast<unsigned short>(std::stoi(item.substr(pos + 1)));
+
+        peers.emplace_back(host, port);
+    }
+
+    return peers;
+}
+
+Address getEnvAddress(const char* env_var_name) {
+    const char* val = std::getenv(env_var_name);
+    if (!val) {
+        throw std::runtime_error(std::string("Missing required environment variable: ") + env_var_name);
+    }
+
+    std::string str(val);
+    const auto pos = str.find(':');
+    if (pos == std::string::npos || pos == 0 || pos == str.length() - 1) {
+        throw std::invalid_argument(std::string("Invalid address format for ") + env_var_name + ": " + str);
+    }
+
+    std::string host = str.substr(0, pos);
+    unsigned short port = static_cast<unsigned short>(std::stoi(str.substr(pos + 1)));
+
+    return Address{host, port};
+}
+
+void node(
+    const unsigned char node_id,
+    const bool is_leader,
+    const std::vector<Address> &peers,
+    std::vector<std::thread> &workers
+
+) {
+    workers.emplace_back([&peers, node_id, is_leader]() {
+        try {
+            std::cout << "Okay inside of here with node: " << node_id << std::endl;
+            int consumed = 0, committed = 0;
+            const auto &address = peers[node_id];
+            const auto server_fd = setup_server_socket(address.host(), address.port());
+
+            sockaddr_in client_addr{};
+            auto* client_sockaddr = reinterpret_cast<sockaddr*>(&client_addr);
+            socklen_t cli_addr_len = sizeof(client_addr);
+            constexpr auto buffer_size = 1000000;
+            char buffer[buffer_size];
+
+            while (RUNNING.load(std::memory_order_relaxed)) {
+                while (committed > consumed) {
+                    // apply
+                    consumed++;
+                }
+
+                if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len); size > 0) {
+
+                }
+            }
+
+            std::cout << "Broke out?" << std::endl;
+        } catch (std::exception &e) {
+            std::cerr << e.what() << std::endl;
+        }
+    });
+}
+
+void client(
+    const Address& leader,
+    const unsigned int connections,
+    const unsigned int ops,
+    const unsigned int data_size,
+    std::vector<std::thread> &workers
+) {
+    for (unsigned int i = 0; i < connections; i++) {
+        workers.emplace_back([&leader]() {
+            const auto client_fd = socket(AF_INET, SOCK_DGRAM, 0);
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(leader.port());
+            socklen_t addr_len = sizeof(addr);
+
+            if (inet_pton(AF_INET, leader.host().c_str(), &addr.sin_addr) <= 0) {
+                close(client_fd);
+                throw std::runtime_error("Invalid address");
+            }
+
+            while (RUNNING.load(std::memory_order_relaxed)) {
+
+            }
+        });
+    }
+}
+
 int main() {
-    struct sigaction action {};
-    action.sa_handler = shutdown;
-    sigemptyset(&action.sa_mask);
-    action.sa_flags = 0;
-    sigaction(SIGINT,  &action, nullptr);
-    sigaction(SIGTERM, &action, nullptr);
-    sigaction(SIGQUIT, &action, nullptr);
-    sigaction(SIGHUP,  &action, nullptr);
+    try {
+        std::cout << "Running it" << std::endl;
+        struct sigaction action {};
+        action.sa_handler = shutdown;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;
+        sigaction(SIGINT,  &action, nullptr);
+        sigaction(SIGTERM, &action, nullptr);
+        sigaction(SIGQUIT, &action, nullptr);
+        sigaction(SIGHUP,  &action, nullptr);
 
+        std::vector<std::thread> workers;
 
-    constexpr unsigned int pipes = 1;
-    constexpr unsigned int instances = 1;
-    const std::vector peers{
-        Address{ "127.0.0.1", 6969 },
-        // Address{ "127.0.0.1", 6970 },
+        // if (const char* is_client_env = std::getenv("IS_CLIENT"); is_client_env && (std::string(is_client_env) == "1" || std::string(is_client_env) =="true")) {
+        //     // const auto leader = getEnvAddress("LEADER_ADDRESS");
+        //     // const auto connections = getEnvUInt("CONNECTIONS");
+        //     // const auto ops = getEnvUInt("OPS");
+        //     // const auto data_size = getEnvUInt("DATA_SIZE");
+        // } else {
+        //     // const auto node_id = getEnvUInt("NODE_ID");
+        //     // const auto is_leader = getEnvUInt("IS_LEADER");
+        //     // const auto connections = getEnvUInt("CONNECTIONS");
+        //     // const auto address = getEnvAddress("ADDRESS");
+        //     // const auto peers = getEnvPeers("PEERS");
+        //     // node(node_id, is_leader, address, peers, workers);
+        //
+        // }
 
-        Address{ "127.0.0.1", 6971 },
-        // Address{ "127.0.0.1", 6972 }
-    };
+        std::vector<Address> peers = {
+            Address { "127.0.0.1", 6969},
+            Address { "127.0.0.1", 6970},
+            Address { "127.0.0.1", 6971}
+        };
 
-    const auto nodes = peers.size() / instances;
-    std::cout << "N=" << nodes << std::endl;
+        node(0, true, peers, workers);
+        node(1, false, peers, workers);
+        node(2, false, peers, workers);
 
-    Consensus<256> node0(IOType::EPOLL, Algorithm::MULTI_PAXOS, instances, 0, 0, pipes, peers, 100000);
-    Consensus<256> node1(IOType::EPOLL, Algorithm::MULTI_PAXOS, instances, 0, 1, pipes, peers, 100000);
-   while (RUNNING.load()) {
-       pause();
-   }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        // client(Address { "127.0.0.1", 6969 }, 1, 1, 1, workers);
 
-   node0.shutdown();
-   node1.shutdown();
-   std::cout << "Shutting down..." << std::endl;
+        while (RUNNING.load()) {
+            pause();
+        }
+
+        for (auto& worker : workers) {
+            worker.join();
+        }
+
+        std::cout << "Shutting down..." << std::endl;
+    } catch (std::exception& e) {
+        std::cerr << e.what() << std::endl;
+    }
 }
