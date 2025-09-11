@@ -206,20 +206,31 @@ void client(
     std::vector<std::thread> &workers
 ) {
     for (unsigned int i = 0; i < connections; i++) {
-        workers.emplace_back([&leader]() {
+        workers.emplace_back([&leader, data_size, ops]() {
             const auto client_fd = socket(AF_INET, SOCK_DGRAM, 0);
-            sockaddr_in addr{};
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(leader.port());
-            socklen_t addr_len = sizeof(addr);
+            sockaddr_in cli_addr{};
+            cli_addr.sin_family = AF_INET;
+            cli_addr.sin_port = htons(leader.port());
+            socklen_t addr_len = sizeof(cli_addr);
+            auto* client_sockaddr = reinterpret_cast<sockaddr*>(&cli_addr);
 
-            if (inet_pton(AF_INET, leader.host().c_str(), &addr.sin_addr) <= 0) {
+            char buffer[data_size];
+
+            if (inet_pton(AF_INET, leader.host().c_str(), &cli_addr.sin_addr) <= 0) {
                 close(client_fd);
                 throw std::runtime_error("Invalid address");
             }
 
+            bool wrote = false;
             while (RUNNING.load(std::memory_order_relaxed)) {
+                // write out one packet and wait for response
+                if (!wrote) {
 
+                    wrote = true;
+                }
+                if (const auto size = recvfrom(client_fd, buffer, data_size, 0, client_sockaddr, &addr_len); size > 0) {
+
+                }
             }
         });
     }
