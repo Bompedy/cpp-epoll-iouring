@@ -267,13 +267,13 @@ void node(
 ) {
     workers.emplace_back([&peers, node_id, is_leader]() {
         try {
-            constexpr auto buffer_size = 50000;
-            BufferPool pool(1000, buffer_size);
+            constexpr auto buffer_size = 1000;
+            auto pool = new BufferPool(100000, buffer_size);
             int slot = 0, consumed = 0, committed = 0;
-            constexpr unsigned int log_size = 1000000;
+            constexpr unsigned int log_size = 100000;
             auto log = new char*[log_size];
-            std::unordered_map<std::string, char*> storage{};
-            unsigned char acks[log_size];
+            // std::unordered_map<std::string, char*> storage{};
+            auto acks = new unsigned char[log_size];
 
 
             const auto quorum = (peers.size() / 2) + 1;
@@ -308,11 +308,11 @@ void node(
 
 
                     acks[consumed % log_size] = 0;
-                    pool.release(data);
+                    pool->release(data);
                     consumed++;
                 }
 
-                auto buffer = pool.acquire();
+                auto buffer = pool->acquire();
                 if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len); size > 0) {
                     const auto op = buffer[0];
                     switch (op) {
@@ -357,7 +357,7 @@ void node(
                                 broadcast(server_fd, node_id, peers, buffer, 5);
                             }
 
-                            pool.release(buffer);
+                            pool->release(buffer);
                             break;
                         }
 
@@ -370,17 +370,19 @@ void node(
                             if (next_commit > committed) {
                                 committed = next_commit;
                             }
-                            pool.release(buffer);
+                            pool->release(buffer);
                             break;
                         }
 
                         default: { throw std::runtime_error("Invalid operation"); }
                     }
                 } else {
-                    pool.release(buffer);
+                    pool->release(buffer);
                 }
             }
             delete[] log;
+            delete[] acks;
+            delete pool;
             std::cout << "Broke out?" << std::endl;
         } catch (std::exception &e) {
             std::cerr << e.what() << std::endl;
@@ -396,9 +398,19 @@ void client(
     std::vector<std::thread> &workers
 ) {
     const auto ops_per_conn = ops / connections;
+    auto completed_connections = std::make_shared<std::atomic<int>>(0);
+
+    workers.emplace_back([completed_connections, connections]() {
+        while (completed_connections->load() != connections) {
+            std::this_thread::yield();
+        }
+        std::cout << "All connections completed!" << std::endl;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
     for (unsigned int i = 0; i < connections; i++) {
-        workers.emplace_back([&leader, data_size, ops_per_conn]() {
-            // std::cout << " Do we die" << std::endl;
+        workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn]() {
             auto completed_ops = 0;
             const auto client_fd = socket(AF_INET, SOCK_DGRAM, 0);
             sockaddr_in cli_addr{};
@@ -420,9 +432,7 @@ void client(
             bool is_write = true;
 
             while (RUNNING.load(std::memory_order_relaxed)) {
-                // write out one packet and wait for response
                 if (should_send) {
-                    std::cout << "Should send" << std::endl;
                     if (is_write) {
                         write_buffer[21] = REQUEST_WRITE;
                         // key, value
@@ -438,18 +448,18 @@ void client(
                 if (const auto size = recvfrom(client_fd, read_buffer, data_size+20, 0, client_sockaddr, &addr_len); size > 0) {
                     if (read_buffer[0] == OP_CLIENT_RESPONSE) {
                         if (++completed_ops >= ops_per_conn) {
+                            // std::cout << "Incrementing completed" << std::endl;
+                            completed_connections->fetch_add(1);
                             break;
                         }
                         should_send = true;
-                        
+
                     } else {
                         throw std::runtime_error("Invalid client response");
                     }
                 }
             }
         });
-
-         // wait for completion
     }
 }
 
@@ -496,7 +506,7 @@ int main() {
         node(2, false, peers, workers);
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
-        client(Address { "127.0.0.1", 6969 }, 2, 100, 1, workers);
+        client(Address { "127.0.0.1", 6969 }, 3, 10000, 1, workers);
 
         while (RUNNING.load()) {
             pause();
@@ -505,6 +515,7 @@ int main() {
         for (auto& worker : workers) {
             worker.join();
         }
+        //
 
         std::cout << "Shutting down..." << std::endl;
     } catch (std::exception& e) {
