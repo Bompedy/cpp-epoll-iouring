@@ -520,7 +520,7 @@ int main() {
         node(2, false, peers, workers);
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
-        client(Address { "127.0.0.1", 6969 }, 4, 100000, 1, workers);
+        client(Address { "127.0.0.1", 6969 }, 1, 100000, 1, workers);
 
         while (RUNNING.load()) {
             pause();
