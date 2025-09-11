@@ -179,7 +179,14 @@ void node(
     workers.emplace_back([&peers, node_id, is_leader]() {
         try {
             std::cout << "Okay inside of here with node: " << node_id << std::endl;
-            int consumed = 0, committed = 0;
+            int slot = 0, consumed = 0, committed = 0;
+            constexpr unsigned int log_size = 10000;
+            char log[log_size];
+            char storage[log_size];
+            unsigned char acks[log_size];
+
+
+
             const auto &address = peers[node_id];
             const auto server_fd = setup_server_socket(address.host(), address.port());
 
@@ -191,7 +198,11 @@ void node(
 
             while (RUNNING.load(std::memory_order_relaxed)) {
                 while (committed > consumed) {
-                    // apply
+                    // grab log index, check if read
+                    const auto is_read = false;
+                    if (is_read) {
+                        // write back to client
+                    }
                     consumed++;
                 }
 
@@ -200,16 +211,23 @@ void node(
                     const auto op = buffer[0];
                     switch (op) {
                         case OP_CLIENT_REQUEST: {
-                            break;
-                        }
-                        case OP_CLIENT_RESPONSE: {
+                            const auto type = buffer[1];
+                            if (type == REQUEST_READ) {
+                                // do read stuff
+                            } else {
+                                // do write stuff
+                            }
+
+                            // propose
                             break;
                         }
 
                         case OP_PROPOSE: {
+                            // fill log ack back
                             break;
                         }
                         case OP_ACK: {
+                            // get slot increment acks, try to move committed up if possible
                             break;
                         }
 
@@ -232,8 +250,10 @@ void client(
     const unsigned int data_size,
     std::vector<std::thread> &workers
 ) {
+    const auto ops_per_conn = ops / connections;
     for (unsigned int i = 0; i < connections; i++) {
-        workers.emplace_back([&leader, data_size, ops]() {
+        workers.emplace_back([&leader, data_size, ops_per_conn]() {
+            auto completed_ops = 0;
             const auto client_fd = socket(AF_INET, SOCK_DGRAM, 0);
             sockaddr_in cli_addr{};
             cli_addr.sin_family = AF_INET;
@@ -255,14 +275,18 @@ void client(
                     wrote = true;
                 }
                 if (const auto size = recvfrom(client_fd, buffer, data_size, 0, client_sockaddr, &addr_len); size > 0) {
-                    const auto op = buffer[0];
-                    if (op == OP_CLIENT_RESPONSE) {
+                    if (buffer[0] == OP_CLIENT_RESPONSE) {
+                        if (++completed_ops >= ops_per_conn) {
+                            break;
+                        }
                         wrote = false;
                     } else {
                         throw std::runtime_error("Invalid client response");
                     }
                 }
             }
+
+
         });
     }
 }
