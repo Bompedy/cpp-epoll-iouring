@@ -11,10 +11,6 @@
 #include <fcntl.h>
 
 
-// #include "consensus.h"
-// #include "temp.h"
-
-
 std::atomic RUNNING { true };
 
 class Address {
@@ -181,12 +177,12 @@ void node(
             std::cout << "Okay inside of here with node: " << node_id << std::endl;
             int slot = 0, consumed = 0, committed = 0;
             constexpr unsigned int log_size = 10000;
-            char log[log_size];
-            char storage[log_size];
+            char* log[log_size];
+            char* storage[log_size];
             unsigned char acks[log_size];
 
 
-
+            constexpr auto quorum = (peers.size() / 2) + 1;
             const auto &address = peers[node_id];
             const auto server_fd = setup_server_socket(address.host(), address.port());
 
@@ -211,8 +207,7 @@ void node(
                     const auto op = buffer[0];
                     switch (op) {
                         case OP_CLIENT_REQUEST: {
-                            const auto type = buffer[1];
-                            if (type == REQUEST_READ) {
+                            if (const auto type = buffer[1]; type == REQUEST_READ) {
                                 // do read stuff
                             } else {
                                 // do write stuff
@@ -223,11 +218,29 @@ void node(
                         }
 
                         case OP_PROPOSE: {
+                            int proposed_slot;
+                            std::memcpy(&proposed_slot, &buffer[1], sizeof(int));
                             // fill log ack back
                             break;
                         }
                         case OP_ACK: {
-                            // get slot increment acks, try to move committed up if possible
+                            int acked_slot;
+                            std::memcpy(&acked_slot, &buffer[1], sizeof(int));
+                            acks[acked_slot] += 1;
+                            const auto current_commit = committed;
+                            while (acks[committed+1] >= quorum) {
+                                ++committed;
+                            }
+                            if (current_commit != committed) {
+                                // write out commit packet
+                            }
+                            break;
+                        }
+
+                        case OP_COMMIT: {
+                            int next_commit;
+                            std::memcpy(&next_commit, &buffer[1], sizeof(int));
+                            committed = next_commit;
                             break;
                         }
 
