@@ -240,7 +240,6 @@ struct BufferPool {
     }
 
     char* acquire() {
-        std::lock_guard<std::mutex> lock(mutex);
         if (free_buffers.empty()) {
             return new char[buffer_size];
         }
@@ -250,12 +249,10 @@ struct BufferPool {
     }
 
     void release(char* buffer) {
-        std::lock_guard<std::mutex> lock(mutex);
         free_buffers.push_back(buffer);
     }
 
     size_t available() {
-        std::lock_guard<std::mutex> lock(mutex);
         return free_buffers.size();
     }
 };
@@ -274,23 +271,21 @@ void node(
         try {
             constexpr auto buffer_size = 100;
             constexpr unsigned int log_size = 1100000;
-            auto pool = new BufferPool(log_size*2, buffer_size);
             int slot = 0, consumed = 0;
 
             std::atomic<unsigned int> committed(0);
             auto log = new char*[log_size];
             // std::unordered_map<std::string, char*> storage{};
-            auto acks = new unsigned char[log_size];
+            auto* acks = new std::atomic<unsigned char>[log_size];
+            for (unsigned int i = 0; i < log_size; ++i) {
+                acks[i].store(0);
+            }
 
             const auto quorum = (peers.size() / 2) + 1;
             const auto &address = peers[node_id];
             const auto server_fd = setup_server_socket(address.host(), address.port());
 
-            sockaddr_in client_addr{};
-            auto* client_sockaddr = reinterpret_cast<sockaddr*>(&client_addr);
-            socklen_t cli_addr_len = sizeof(client_addr);
-
-            workers.emplace_back([server_fd, &committed, &consumed, log, is_leader, acks, pool, node_id]() {
+            workers.emplace_back([server_fd, &committed, &consumed, log, is_leader, node_id]() {
                 while (RUNNING.load(std::memory_order_relaxed)) {
                     if (committed.load(std::memory_order_relaxed) > consumed) {
                         const auto data = log[consumed % log_size];
@@ -325,40 +320,68 @@ void node(
                         }
 
                         // acks[consumed % log_size] = 0;
-                        pool->release(data);
+                        // pool->release(data);
                         consumed++;
                     } else std::this_thread::yield();
                 }
             });
 
+            if (is_leader) {
+                workers.emplace_back([&slot, acks, log, node_id, &peers, log_size, buffer_size, server_fd]() {
+                    const auto request_fd = setup_server_socket("127.0.0.1", 7069);
+                    auto pool = new BufferPool(log_size, buffer_size);
+                    sockaddr_in client_addr{};
+                    auto *client_sockaddr = reinterpret_cast<sockaddr *>(&client_addr);
+                    socklen_t cli_addr_len = sizeof(client_addr);
+                    while (RUNNING.load(std::memory_order_relaxed)) {
+                        const auto buffer = pool->acquire();
+                        if (const auto size = recvfrom(request_fd, buffer, buffer_size, 0, client_sockaddr,
+                                                       &cli_addr_len); size > 0) {
+                            std::cout << "Got " << size << " bytes from node " << node_id << std::endl;
+                            if (buffer[0] == OP_CLIENT_REQUEST) {
+                                std::cout << "Got client request" << std::endl;
+                                const auto next_slot = slot++;
+                                if (acks[next_slot % log_size] != 0) {
+                                    throw std::runtime_error(
+                                        "OUT OF LOG SPACE AT INDEX: " + std::to_string(next_slot) + " " +
+                                        std::to_string(acks[next_slot % log_size]));
+                                }
+                                acks[next_slot % log_size].store(1);
+                                std::memcpy(&buffer[1], &next_slot, sizeof(int));
+                                std::memcpy(&buffer[5], &client_addr, cli_addr_len);
+                                log[next_slot % log_size] = buffer;
+                                buffer[0] = OP_PROPOSE;
+                                broadcast(request_fd, node_id, peers, buffer, size);
+                            } else {
+                                throw std::invalid_argument(
+                                    "Invalid op on client request: " + std::to_string(buffer[0]));
+                            }
+                        } else {
+                            pool->release(buffer);
+                        }
+                    }
+
+                    delete pool;
+                    close(request_fd);
+                });
+            }
+
+            sockaddr_in client_addr{};
+            auto* client_sockaddr = reinterpret_cast<sockaddr*>(&client_addr);
+            socklen_t cli_addr_len = sizeof(client_addr);
+            const auto pool = new BufferPool(log_size*2, buffer_size);
             while (RUNNING.load(std::memory_order_relaxed)) {
-                auto buffer = pool->acquire();
+                const auto buffer = pool->acquire();
                 if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len); size > 0) {
                     switch (const auto op = buffer[0]) {
-                        case OP_CLIENT_REQUEST: {
-                            // std::cout << "Got client request: " << node_id << std::endl;
-                            const auto next_slot = slot++;
-                            if (acks[next_slot % log_size] != 0) {
-                                throw std::runtime_error("OUT OF LOG SPACE AT INDEX: " + std::to_string(next_slot) + " " + std::to_string(acks[next_slot % log_size]));
-                            }
-                            acks[next_slot % log_size] = 1;
-                            std::memcpy(&buffer[1], &next_slot, sizeof(int));
-                            std::memcpy(&buffer[5], &client_addr, cli_addr_len);
-                            log[next_slot % log_size] = buffer;
-                            buffer[0] = OP_PROPOSE;
-                            broadcast(server_fd, node_id, peers, buffer, size);
-                            break;
-                        }
-
                         case OP_PROPOSE: {
-                            // std::cout << "Got proposal request on node: " << node_id << std::endl;
+                            std::cout << "Got proposal request on node: " << node_id << std::endl;
                             buffer[0] = OP_ACK;
                             int proposed_slot;
                             std::memcpy(&proposed_slot, &buffer[1], sizeof(int));
                             log[proposed_slot % log_size] = buffer;
-                            // std::cout << "Proposed slot: " << proposed_slot << std::endl;
 
-                            if (sendto(server_fd, buffer, 5, 0, client_sockaddr, cli_addr_len) <= 0) {
+                            if (sendto(server_fd, buffer, 5, 0, peers[0].sockaddr_ptr(), peers[0].sockaddr_len()) <= 0) {
                                  throw std::runtime_error("Failed to send message to node " + std::to_string(node_id));
                             }
                             break;
@@ -366,18 +389,18 @@ void node(
 
                         case OP_ACK: {
                             int acked_slot;
-                            // std::cout << "Got ack back for slot: " << acked_slot << std::endl;
+                            std::cout << "Got ack back for slot: " << acked_slot << std::endl;
                             std::memcpy(&acked_slot, &buffer[1], sizeof(int));
                             acks[acked_slot % log_size] += 1;
 
                             const auto before_commit = committed.load(std::memory_order_relaxed);
                             auto current_commit = before_commit;
-                            while (acks[current_commit % log_size] >= quorum) {
+                            while (acks[current_commit % log_size].load() >= quorum) {
                                 ++current_commit;
                             }
 
                             if (before_commit != current_commit) {
-                                // std::cout << "Moving commit up to: " << current_commit << std::endl;
+                                std::cout << "Moving commit up to: " << current_commit << std::endl;
                                 committed.store(current_commit, std::memory_order_relaxed);
                                 buffer[0] = OP_COMMIT;
                                 std::memcpy(&buffer[1], &current_commit, sizeof(int));
@@ -408,6 +431,7 @@ void node(
             delete[] log;
             delete[] acks;
             delete pool;
+            close(server_fd);
             std::cout << "Broke out?" << std::endl;
         } catch (std::exception &e) {
             std::cerr << e.what() << std::endl;
@@ -463,8 +487,8 @@ void client(
             cli_addr.sin_port = htons(leader.port());
             socklen_t addr_len = sizeof(cli_addr);
             auto* client_sockaddr = reinterpret_cast<sockaddr*>(&cli_addr);
-            char write_buffer[data_size+20];
-            char read_buffer[data_size+20];
+            char write_buffer[data_size+100];
+            char read_buffer[data_size+100];
 
             if (inet_pton(AF_INET, leader.host().c_str(), &cli_addr.sin_addr) <= 0) {
                 close(client_fd);
@@ -486,13 +510,14 @@ void client(
                         // key
                     }
                     // std::cout << "Sending out client request" << std::endl;
-                    if (sendto(client_fd, write_buffer, data_size+6, 0, leader.sockaddr_ptr(), leader.sockaddr_len()) <= 0) {
+                    if (sendto(client_fd, write_buffer, data_size+22, 0, leader.sockaddr_ptr(), leader.sockaddr_len()) <= 0) {
                         throw std::runtime_error("Failed to send message from client to leader");
                     }
                     should_send = false;
                 }
-                if (const auto size = recvfrom(client_fd, read_buffer, data_size+20, 0, client_sockaddr, &addr_len); size > 0) {
+                if (const auto size = recvfrom(client_fd, read_buffer, data_size+100, 0, client_sockaddr, &addr_len); size > 0) {
                     if (read_buffer[0] == OP_CLIENT_RESPONSE) {
+                        std::cout << "Got client response" << std::endl;
                         ++completed_ops;
                         if (completed_ops % 10000 == 0) {
                             std::cout << completed_ops << std::endl;
@@ -552,7 +577,7 @@ int main() {
         node(2, false, peers, workers);
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        client(Address { "127.0.0.1", 6969 }, 5, 1000000, 1, workers);
+        client(Address { "127.0.0.1", 7069 }, 1, 1, 1, workers);
 
         while (RUNNING.load()) {
             pause();
