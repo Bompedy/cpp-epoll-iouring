@@ -268,9 +268,9 @@ void node(
     workers.emplace_back([&peers, node_id, is_leader]() {
         try {
             constexpr auto buffer_size = 1000;
-            auto pool = new BufferPool(100000, buffer_size);
+            auto pool = new BufferPool(1000000, buffer_size);
             int slot = 0, consumed = 0, committed = 0;
-            constexpr unsigned int log_size = 100000;
+            constexpr unsigned int log_size = 5000;
             auto log = new char*[log_size];
             // std::unordered_map<std::string, char*> storage{};
             auto acks = new unsigned char[log_size];
@@ -286,6 +286,16 @@ void node(
             while (RUNNING.load(std::memory_order_relaxed)) {
                 while (committed > consumed) {
                     const auto data = log[consumed % log_size];
+                    if (data == nullptr) {
+                        if (is_leader) {
+                            throw std::runtime_error("such a bad problem");
+                        }
+
+                        // break;
+                        consumed++;
+                        std::cout << "Stuck trying to consume slot: " << consumed << std::endl;
+                        continue;
+                    }
                     const auto is_read = data[21] == REQUEST_READ;
                     const auto is_write = data[21] == REQUEST_WRITE;
 
@@ -305,7 +315,6 @@ void node(
                         } else throw std::invalid_argument("Invalid leader address format");
                     }
 
-
                     acks[consumed % log_size] = 0;
                     pool->release(data);
                     consumed++;
@@ -318,7 +327,9 @@ void node(
                         case OP_CLIENT_REQUEST: {
                             // std::cout << "Got client request: " << node_id << std::endl;
                             const auto next_slot = slot++;
-                            if (next_slot > log_size || acks[next_slot % log_size] != 0) throw std::runtime_error("OUT OF LOG SPACE");
+                            if (acks[next_slot % log_size] != 0) {
+                                throw std::runtime_error("OUT OF LOG SPACE AT INDEX: " + std::to_string(next_slot) + " " + std::to_string(acks[next_slot % log_size]));
+                            }
                             acks[next_slot % log_size] = 1;
                             std::memcpy(&buffer[1], &next_slot, sizeof(int));
                             std::memcpy(&buffer[5], &client_addr, cli_addr_len);
@@ -343,14 +354,16 @@ void node(
 
                         case OP_ACK: {
                             int acked_slot;
+                            std::cout << "Got ack back for slot: " << acked_slot << std::endl;
                             std::memcpy(&acked_slot, &buffer[1], sizeof(int));
                             acks[acked_slot] += 1;
                             const auto current_commit = committed;
-                            while (acks[committed] >= quorum) {
+                            while (acks[committed] >= 2) {
                                 ++committed;
                             }
 
                             if (current_commit != committed) {
+                                std::cout << "Moved committed from: " << current_commit << " to " << committed << std::endl;
                                 buffer[0] = OP_COMMIT;
                                 std::memcpy(&buffer[1], &committed, sizeof(int));
                                 broadcast(server_fd, node_id, peers, buffer, 5);
@@ -425,6 +438,7 @@ void client(
     *start = time_millis();
     for (unsigned int i = 0; i < connections; i++) {
         workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn]() {
+            std::cout << "Starting thread" << std::endl;
             auto completed_ops = 0;
             const auto client_fd = socket(AF_INET, SOCK_DGRAM, 0);
             sockaddr_in cli_addr{};
@@ -466,7 +480,7 @@ void client(
                             std::cout << completed_ops << std::endl;
                         }
                         if (completed_ops >= ops_per_conn) {
-                            // std::cout << "Incrementing completed" << std::endl;
+                            std::cout << "Incrementing completed" << std::endl;
                             completed_connections->fetch_add(1);
                             break;
                         }
@@ -520,7 +534,7 @@ int main() {
         node(2, false, peers, workers);
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
-        client(Address { "127.0.0.1", 6969 }, 1, 100000, 1, workers);
+        client(Address { "127.0.0.1", 6969 }, 10, 10000, 1, workers);
 
         while (RUNNING.load()) {
             pause();
