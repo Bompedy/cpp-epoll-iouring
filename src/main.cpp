@@ -197,7 +197,7 @@ inline void broadcast(
 ) {
     for (int i = 0; i < peers.size(); ++i) {
         if (i != node_id) {
-            if (sendto(fd, buffer, buffer_size, MSG_CONFIRM, peers[i].sockaddr_ptr(), peers[i].sockaddr_len()) <= 0) {
+            if (sendto(fd, buffer, buffer_size, 0, peers[i].sockaddr_ptr(), peers[i].sockaddr_len()) <= 0) {
                 throw std::runtime_error("Failed to send message to node " + std::to_string(node_id));
             }
         }
@@ -305,10 +305,14 @@ void node(
                             if (is_leader) {
                                 sockaddr sender_addr{};
                                 std::memcpy(&sender_addr, &data[5], sizeof(sockaddr_in));
+                                sockaddr_in* sender_in = reinterpret_cast<sockaddr_in*>(&sender_addr);
+                                char *ip = inet_ntoa(sender_in->sin_addr);
+                                int port = ntohs(sender_in->sin_port);
+                                // std::cout << "Sending response to client at " << ip << ":" << port << std::endl;
                                 if (is_write) {
                                     // std::cout << "Gonna write back to client for slot: " << consumed << std::endl;
                                     data[0] = OP_CLIENT_RESPONSE;
-                                    if (sendto(server_fd, data, 1, MSG_CONFIRM, &sender_addr, sizeof(sockaddr)) <= 0) {
+                                    if (sendto(server_fd, data, 1, 0, &sender_addr, sizeof(sockaddr)) <= 0) {
                                         throw std::runtime_error(
                                             "Failed to send message to node " + std::to_string(node_id));
                                     }
@@ -332,7 +336,8 @@ void node(
                     socklen_t cli_addr_len = sizeof(client_addr);
                     while (RUNNING.load(std::memory_order_relaxed)) {
                         const auto buffer = pool->acquire();
-                        if (const auto size = recvfrom(request_fd, buffer, buffer_size, MSG_CONFIRM, client_sockaddr,
+                        cli_addr_len = sizeof(client_addr);
+                        if (const auto size = recvfrom(request_fd, buffer, buffer_size, 0, client_sockaddr,
                                                        &cli_addr_len); size > 0) {
                             // std::cout << "Got " << size << " bytes from node " << node_id << std::endl;
                             if (buffer[0] == OP_CLIENT_REQUEST) {
@@ -372,7 +377,7 @@ void node(
             const auto pool = new BufferPool(log_size * 2, buffer_size);
             while (RUNNING.load(std::memory_order_relaxed)) {
                 const auto buffer = pool->acquire();
-                if (const auto size = recvfrom(server_fd, buffer, buffer_size, MSG_CONFIRM, client_sockaddr, &cli_addr_len);
+                if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len);
                     size > 0) {
                     switch (const auto op = buffer[0]) {
                         case OP_PROPOSE: {
@@ -383,8 +388,8 @@ void node(
                             std::memcpy(&ack_buffer[1], &proposed_slot, sizeof(int));
                             log[proposed_slot % log_size] = buffer;
 
-                            if (sendto(server_fd, ack_buffer, 5, MSG_CONFIRM, peers[0].sockaddr_ptr(),
-                                       peers[0].sockaddr_len()) <= 0) {
+                            if (sendto(server_fd, ack_buffer, 5, 0, client_sockaddr,
+                                       cli_addr_len) <= 0) {
                                 throw std::runtime_error("Failed to send message to node " + std::to_string(node_id));
                             }
                             break;
@@ -426,7 +431,7 @@ void node(
                         }
 
                         default: {
-                            throw std::runtime_error("Invalid operation: " + std::to_string(buffer[0]));
+                            throw std::runtime_error("Invalid operation on node: " + std::to_string(node_id) + " op: " + std::to_string(buffer[0]));
                         }
                     }
                 } else {
@@ -517,13 +522,13 @@ void client(
                         // key
                     }
                     // std::cout << "Sending out client request" << std::endl;
-                    if (sendto(client_fd, write_buffer, data_size + 22, MSG_CONFIRM, leader.sockaddr_ptr(),
+                    if (sendto(client_fd, write_buffer, data_size + 22, 0, leader.sockaddr_ptr(),
                                leader.sockaddr_len()) <= 0) {
                         throw std::runtime_error("Failed to send message from client to leader");
                     }
                     should_send = false;
                 }
-                if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, MSG_CONFIRM, client_sockaddr, &addr_len);
+                if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, 0, client_sockaddr, &addr_len);
                     size > 0) {
                     if (read_buffer[0] == OP_CLIENT_RESPONSE) {
                         // std::cout << "Got client response" << std::endl;
@@ -584,8 +589,8 @@ int main() {
         node(1, false, peers, workers);
         node(2, false, peers, workers);
 
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        client(Address{"127.0.0.1", 7069}, 1, 500000, 1, workers);
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        client(Address{"127.0.0.1", 7069}, 1, 100, 1, workers);
 
         while (RUNNING.load()) {
             pause();
