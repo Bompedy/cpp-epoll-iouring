@@ -12,11 +12,11 @@
 #include <unordered_map>
 
 
-std::atomic RUNNING { true };
+std::atomic RUNNING{true};
 
 class Address {
-    sockaddr_storage storage_{};     // Generic storage for sockaddr
-    sockaddr* sock_;               // Pointer to casted sockaddr_in
+    sockaddr_storage storage_{}; // Generic storage for sockaddr
+    sockaddr *sock_; // Pointer to casted sockaddr_in
     std::string host_;
     unsigned short port_;
 
@@ -25,33 +25,34 @@ public:
         std::memset(&storage_, 0, sizeof(storage_));
 
         // Fill in IPv4 sockaddr_in
-        auto* addr_in = reinterpret_cast<sockaddr_in*>(&storage_);
+        auto *addr_in = reinterpret_cast<sockaddr_in *>(&storage_);
         addr_in->sin_family = AF_INET;
         addr_in->sin_port = htons(port_);
         if (inet_pton(AF_INET, host_.c_str(), &addr_in->sin_addr) <= 0) {
             throw std::invalid_argument("Invalid IPv4 address: " + host_);
         }
 
-        sock_ = reinterpret_cast<sockaddr*>(&storage_);
+        sock_ = reinterpret_cast<sockaddr *>(&storage_);
     }
 
     // Accessors
-    [[nodiscard]] const std::string& host() const { return host_; }
+    [[nodiscard]] const std::string &host() const { return host_; }
     [[nodiscard]] unsigned short port() const { return port_; }
 
     // Equality
-    bool operator==(const Address& other) const {
+    bool operator==(const Address &other) const {
         return host_ == other.host_ && port_ == other.port_;
     }
 
     // Return sockaddr* directly (no casting needed)
-    [[nodiscard]] sockaddr* sockaddr_ptr() const { return sock_; }
+    [[nodiscard]] sockaddr *sockaddr_ptr() const { return sock_; }
     [[nodiscard]] socklen_t sockaddr_len() const { return sizeof(sockaddr_in); }
 };
+
 bool tune_socket(
     const int fd,
     const unsigned int buffer_size
-    ) {
+) {
     const auto flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         perror("fcntl F_GETFL");
@@ -77,7 +78,7 @@ bool tune_socket(
     return true;
 }
 
-int setup_server_socket(const std::string& address, const unsigned short port) {
+int setup_server_socket(const std::string &address, const unsigned short port) {
     constexpr int opt = 1;
     const auto server_fd = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -123,8 +124,8 @@ void shutdown(const int signum) {
     RUNNING.store(false);
 }
 
-unsigned int getEnvUInt(const char* name) {
-    const char* val = std::getenv(name);
+unsigned int getEnvUInt(const char *name) {
+    const char *val = std::getenv(name);
     if (!val) throw std::runtime_error("Environment variable " + std::string(name) + " is not set");
 
     try {
@@ -134,8 +135,8 @@ unsigned int getEnvUInt(const char* name) {
     }
 }
 
-std::vector<Address> getEnvPeers(const char* env_var_name) {
-    const char* val = std::getenv(env_var_name);
+std::vector<Address> getEnvPeers(const char *env_var_name) {
+    const char *val = std::getenv(env_var_name);
     if (!val) {
         throw std::runtime_error(std::string("Missing required environment variable: ") + env_var_name);
     }
@@ -160,8 +161,8 @@ std::vector<Address> getEnvPeers(const char* env_var_name) {
     return peers;
 }
 
-Address getEnvAddress(const char* env_var_name) {
-    const char* val = std::getenv(env_var_name);
+Address getEnvAddress(const char *env_var_name) {
+    const char *val = std::getenv(env_var_name);
     if (!val) {
         throw std::runtime_error(std::string("Missing required environment variable: ") + env_var_name);
     }
@@ -191,12 +192,12 @@ inline void broadcast(
     const int fd,
     const unsigned char node_id,
     const std::vector<Address> &peers,
-    const char* buffer,
+    const char *buffer,
     const unsigned int buffer_size
 ) {
     for (int i = 0; i < peers.size(); ++i) {
         if (i != node_id) {
-            if (sendto(fd, buffer, buffer_size, 0, peers[i].sockaddr_ptr(), peers[i].sockaddr_len()) <= 0) {
+            if (sendto(fd, buffer, buffer_size, MSG_CONFIRM, peers[i].sockaddr_ptr(), peers[i].sockaddr_len()) <= 0) {
                 throw std::runtime_error("Failed to send message to node " + std::to_string(node_id));
             }
         }
@@ -221,34 +222,33 @@ inline void broadcast(
 #include <mutex>
 
 struct BufferPool {
-    std::vector<char*> free_buffers;
+    std::vector<char *> free_buffers;
     size_t buffer_size;
     std::mutex mutex;
 
     BufferPool(size_t buffer_count, size_t buffer_size)
-        : buffer_size(buffer_size)
-    {
+        : buffer_size(buffer_size) {
         for (size_t i = 0; i < buffer_count; ++i) {
             free_buffers.push_back(new char[buffer_size]);
         }
     }
 
     ~BufferPool() {
-        for (char* buf : free_buffers) {
+        for (char *buf: free_buffers) {
             delete[] buf;
         }
     }
 
-    char* acquire() {
+    char *acquire() {
         if (free_buffers.empty()) {
             return new char[buffer_size];
         }
-        char* buf = free_buffers.back();
+        char *buf = free_buffers.back();
         free_buffers.pop_back();
         return buf;
     }
 
-    void release(char* buffer) {
+    void release(char *buffer) {
         free_buffers.push_back(buffer);
     }
 
@@ -256,8 +256,6 @@ struct BufferPool {
         return free_buffers.size();
     }
 };
-
-
 
 
 void node(
@@ -271,12 +269,9 @@ void node(
         try {
             constexpr auto buffer_size = 100;
             constexpr unsigned int log_size = 1100000;
-            int slot = 0, consumed = 0;
-
             std::atomic<unsigned int> committed(0);
-            auto log = new char*[log_size];
-            // std::unordered_map<std::string, char*> storage{};
-            auto* acks = new std::atomic<unsigned char>[log_size];
+            auto log = new char *[log_size];
+            auto *acks = new std::atomic<unsigned char>[log_size];
             for (unsigned int i = 0; i < log_size; ++i) {
                 acks[i].store(0);
             }
@@ -285,61 +280,63 @@ void node(
             const auto &address = peers[node_id];
             const auto server_fd = setup_server_socket(address.host(), address.port());
 
-            workers.emplace_back([server_fd, &committed, &consumed, log, is_leader, node_id]() {
-                while (RUNNING.load(std::memory_order_relaxed)) {
-                    if (committed.load(std::memory_order_relaxed) > consumed) {
-                        const auto data = log[consumed % log_size];
-                        if (data == nullptr) {
+            if (is_leader) {
+                workers.emplace_back([server_fd, &committed, log, is_leader, node_id]() {
+                    unsigned int consumed = 0;
+                    while (RUNNING.load(std::memory_order_relaxed)) {
+                        if (committed.load(std::memory_order_relaxed) > consumed) {
+                            const auto data = log[consumed % log_size];
+                            if (data == nullptr) {
+                                if (is_leader) {
+                                    throw std::runtime_error("such a bad problem");
+                                }
+
+                                // break;
+                                consumed++;
+                                // std::cout << "Stuck trying to consume slot: " << consumed << std::endl;
+                                continue;
+                            }
+                            const auto is_read = data[21] == REQUEST_READ;
+                            const auto is_write = data[21] == REQUEST_WRITE;
+
+                            if (is_write) {
+                                // fill kv
+                            }
                             if (is_leader) {
-                                throw std::runtime_error("such a bad problem");
+                                sockaddr sender_addr{};
+                                std::memcpy(&sender_addr, &data[5], sizeof(sockaddr_in));
+                                if (is_write) {
+                                    // std::cout << "Gonna write back to client for slot: " << consumed << std::endl;
+                                    data[0] = OP_CLIENT_RESPONSE;
+                                    if (sendto(server_fd, data, 1, MSG_CONFIRM, &sender_addr, sizeof(sockaddr)) <= 0) {
+                                        throw std::runtime_error(
+                                            "Failed to send message to node " + std::to_string(node_id));
+                                    }
+                                } else if (is_read) {
+                                } else throw std::invalid_argument("Invalid leader address format");
                             }
 
-                            // break;
+                            // acks[consumed % log_size] = 0;
+                            // pool->release(data);
                             consumed++;
-                            // std::cout << "Stuck trying to consume slot: " << consumed << std::endl;
-                            continue;
-                        }
-                        const auto is_read = data[21] == REQUEST_READ;
-                        const auto is_write = data[21] == REQUEST_WRITE;
+                        } else std::this_thread::yield();
+                    }
+                });
 
-                        if (is_write) {
-                            // fill kv
-                        }
-                        if (is_leader) {
-                            sockaddr sender_addr{};
-                            std::memcpy(&sender_addr, &data[5], sizeof(sockaddr_in));
-                            if (is_write) {
-                                // std::cout << "Gonna write back to client for slot: " << consumed << std::endl;
-                                data[0] = OP_CLIENT_RESPONSE;
-                                if (sendto(server_fd, data, 1, 0, &sender_addr, sizeof(sockaddr)) <= 0) {
-                                    throw std::runtime_error(
-                                        "Failed to send message to node " + std::to_string(node_id));
-                                }
-                            } else if (is_read) {
-                            } else throw std::invalid_argument("Invalid leader address format");
-                        }
-
-                        // acks[consumed % log_size] = 0;
-                        // pool->release(data);
-                        consumed++;
-                    } else std::this_thread::yield();
-                }
-            });
-
-            if (is_leader) {
-                workers.emplace_back([&slot, acks, log, node_id, &peers, log_size, buffer_size, server_fd]() {
+                workers.emplace_back([acks, log, node_id, &peers, log_size, buffer_size, server_fd]() {
                     const auto request_fd = setup_server_socket("127.0.0.1", 7069);
+                    unsigned int slot = 0;
                     auto pool = new BufferPool(log_size, buffer_size);
                     sockaddr_in client_addr{};
                     auto *client_sockaddr = reinterpret_cast<sockaddr *>(&client_addr);
                     socklen_t cli_addr_len = sizeof(client_addr);
                     while (RUNNING.load(std::memory_order_relaxed)) {
                         const auto buffer = pool->acquire();
-                        if (const auto size = recvfrom(request_fd, buffer, buffer_size, 0, client_sockaddr,
+                        if (const auto size = recvfrom(request_fd, buffer, buffer_size, MSG_CONFIRM, client_sockaddr,
                                                        &cli_addr_len); size > 0) {
-                            std::cout << "Got " << size << " bytes from node " << node_id << std::endl;
+                            // std::cout << "Got " << size << " bytes from node " << node_id << std::endl;
                             if (buffer[0] == OP_CLIENT_REQUEST) {
-                                std::cout << "Got client request" << std::endl;
+                                // std::cout << "Got client request" << std::endl;
                                 const auto next_slot = slot++;
                                 if (acks[next_slot % log_size] != 0) {
                                     throw std::runtime_error(
@@ -366,30 +363,36 @@ void node(
                 });
             }
 
+            char ack_buffer[5];
+            ack_buffer[0] = OP_ACK;
+
             sockaddr_in client_addr{};
-            auto* client_sockaddr = reinterpret_cast<sockaddr*>(&client_addr);
+            auto *client_sockaddr = reinterpret_cast<sockaddr *>(&client_addr);
             socklen_t cli_addr_len = sizeof(client_addr);
-            const auto pool = new BufferPool(log_size*2, buffer_size);
+            const auto pool = new BufferPool(log_size * 2, buffer_size);
             while (RUNNING.load(std::memory_order_relaxed)) {
                 const auto buffer = pool->acquire();
-                if (const auto size = recvfrom(server_fd, buffer, buffer_size, 0, client_sockaddr, &cli_addr_len); size > 0) {
+                if (const auto size = recvfrom(server_fd, buffer, buffer_size, MSG_CONFIRM, client_sockaddr, &cli_addr_len);
+                    size > 0) {
                     switch (const auto op = buffer[0]) {
                         case OP_PROPOSE: {
-                            std::cout << "Got proposal request on node: " << node_id << std::endl;
-                            buffer[0] = OP_ACK;
+                            // std::cout << "Got proposal request on node: " << node_id << std::endl;
+                            // buffer[0] = OP_ACK;
                             int proposed_slot;
                             std::memcpy(&proposed_slot, &buffer[1], sizeof(int));
+                            std::memcpy(&ack_buffer[1], &proposed_slot, sizeof(int));
                             log[proposed_slot % log_size] = buffer;
 
-                            if (sendto(server_fd, buffer, 5, 0, peers[0].sockaddr_ptr(), peers[0].sockaddr_len()) <= 0) {
-                                 throw std::runtime_error("Failed to send message to node " + std::to_string(node_id));
+                            if (sendto(server_fd, ack_buffer, 5, MSG_CONFIRM, peers[0].sockaddr_ptr(),
+                                       peers[0].sockaddr_len()) <= 0) {
+                                throw std::runtime_error("Failed to send message to node " + std::to_string(node_id));
                             }
                             break;
                         }
 
                         case OP_ACK: {
                             int acked_slot;
-                            std::cout << "Got ack back for slot: " << acked_slot << std::endl;
+                            // std::cout << "Got ack back for slot: " << acked_slot << std::endl;
                             std::memcpy(&acked_slot, &buffer[1], sizeof(int));
                             acks[acked_slot % log_size] += 1;
 
@@ -400,7 +403,7 @@ void node(
                             }
 
                             if (before_commit != current_commit) {
-                                std::cout << "Moving commit up to: " << current_commit << std::endl;
+                                // std::cout << "Moving commit up to: " << current_commit << std::endl;
                                 committed.store(current_commit, std::memory_order_relaxed);
                                 buffer[0] = OP_COMMIT;
                                 std::memcpy(&buffer[1], &current_commit, sizeof(int));
@@ -422,7 +425,9 @@ void node(
                             break;
                         }
 
-                        default: { throw std::runtime_error("Invalid operation"); }
+                        default: {
+                            throw std::runtime_error("Invalid operation: " + std::to_string(buffer[0]));
+                        }
                     }
                 } else {
                     pool->release(buffer);
@@ -442,21 +447,21 @@ void node(
 long time_millis() {
     auto now = std::chrono::system_clock::now();
     auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()
+        now.time_since_epoch()
     ).count();
     return millis;
 }
 
 void client(
-    const Address& leader,
+    const Address &leader,
     const unsigned int connections,
     const unsigned int ops,
     const unsigned int data_size,
     std::vector<std::thread> &workers
 ) {
     const auto ops_per_conn = ops / connections;
-    auto completed_connections = std::make_shared<std::atomic<int>>(0);
-    auto send_times = std::make_shared<std::vector<long>>();
+    auto completed_connections = std::make_shared<std::atomic<int> >(0);
+    auto send_times = std::make_shared<std::vector<long> >();
     auto start = std::make_shared<long>(0);
 
     workers.emplace_back([completed_connections, connections, ops, data_size, start]() {
@@ -464,14 +469,16 @@ void client(
             std::this_thread::yield();
         }
         auto end = time_millis();
-        auto seconds = (float)(end-*start) / 1e3f;
+        auto seconds = (float) (end - *start) / 1e3f;
         auto mbps = (((float) ops * (float) (data_size * 8)) / 1e6f) / seconds;
         auto ops_per_second = (float) ops / seconds;
-        std::cout << "Update - Count(" << ops << ") OPS(" << ops_per_second << ") Seconds(" << seconds << ") Throughput(" << mbps << " Mbps)" << std::endl;
+        std::cout << "Update - Count(" << ops << ") OPS(" << ops_per_second << ") Seconds(" << seconds <<
+                ") Throughput(" << mbps << " Mbps)" << std::endl;
     });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     // std::cout << "Started" << std::endl;
+
     *start = time_millis();
     for (unsigned int i = 0; i < connections; i++) {
         workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn]() {
@@ -486,9 +493,9 @@ void client(
             cli_addr.sin_family = AF_INET;
             cli_addr.sin_port = htons(leader.port());
             socklen_t addr_len = sizeof(cli_addr);
-            auto* client_sockaddr = reinterpret_cast<sockaddr*>(&cli_addr);
-            char write_buffer[data_size+100];
-            char read_buffer[data_size+100];
+            auto *client_sockaddr = reinterpret_cast<sockaddr *>(&cli_addr);
+            char write_buffer[data_size + 100];
+            char read_buffer[data_size + 100];
 
             if (inet_pton(AF_INET, leader.host().c_str(), &cli_addr.sin_addr) <= 0) {
                 close(client_fd);
@@ -510,25 +517,26 @@ void client(
                         // key
                     }
                     // std::cout << "Sending out client request" << std::endl;
-                    if (sendto(client_fd, write_buffer, data_size+22, 0, leader.sockaddr_ptr(), leader.sockaddr_len()) <= 0) {
+                    if (sendto(client_fd, write_buffer, data_size + 22, MSG_CONFIRM, leader.sockaddr_ptr(),
+                               leader.sockaddr_len()) <= 0) {
                         throw std::runtime_error("Failed to send message from client to leader");
                     }
                     should_send = false;
                 }
-                if (const auto size = recvfrom(client_fd, read_buffer, data_size+100, 0, client_sockaddr, &addr_len); size > 0) {
+                if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, MSG_CONFIRM, client_sockaddr, &addr_len);
+                    size > 0) {
                     if (read_buffer[0] == OP_CLIENT_RESPONSE) {
-                        std::cout << "Got client response" << std::endl;
+                        // std::cout << "Got client response" << std::endl;
                         ++completed_ops;
-                        if (completed_ops % 10000 == 0) {
-                            std::cout << completed_ops << std::endl;
-                        }
+                        // if (completed_ops % 10000 == 0) {
+                        //     // std::cout << completed_ops << std::endl;
+                        // }
                         if (completed_ops >= ops_per_conn) {
                             std::cout << "Incrementing completed: " << completed_ops << std::endl;
                             completed_connections->fetch_add(1);
                             break;
                         }
                         should_send = true;
-
                     } else {
                         throw std::runtime_error("Invalid client response");
                     }
@@ -541,14 +549,14 @@ void client(
 int main() {
     try {
         // std::cout << "a Running it" << std::endl;
-        struct sigaction action {};
+        struct sigaction action{};
         action.sa_handler = shutdown;
         sigemptyset(&action.sa_mask);
         action.sa_flags = 0;
-        sigaction(SIGINT,  &action, nullptr);
+        sigaction(SIGINT, &action, nullptr);
         sigaction(SIGTERM, &action, nullptr);
         sigaction(SIGQUIT, &action, nullptr);
-        sigaction(SIGHUP,  &action, nullptr);
+        sigaction(SIGHUP, &action, nullptr);
 
         std::vector<std::thread> workers;
 
@@ -567,29 +575,29 @@ int main() {
         // }
 
         std::vector<Address> peers = {
-            Address { "127.0.0.1", 6969},
-            Address { "127.0.0.1", 6970},
-            Address { "127.0.0.1", 6971}
+            Address{"127.0.0.1", 6969},
+            Address{"127.0.0.1", 6970},
+            Address{"127.0.0.1", 6971}
         };
 
         node(0, true, peers, workers);
         node(1, false, peers, workers);
         node(2, false, peers, workers);
 
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        client(Address { "127.0.0.1", 7069 }, 1, 1, 1, workers);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        client(Address{"127.0.0.1", 7069}, 1, 500000, 1, workers);
 
         while (RUNNING.load()) {
             pause();
         }
 
-        for (auto& worker : workers) {
+        for (auto &worker: workers) {
             worker.join();
         }
         //
 
         std::cout << "Shutting down..." << std::endl;
-    } catch (std::exception& e) {
+    } catch (std::exception &e) {
         std::cerr << e.what() << std::endl;
     }
 }
