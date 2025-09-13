@@ -5,11 +5,11 @@
 #include "shared.h"
 
 inline void client(
+        const Address &host_address,
         const Address &leader,
         const unsigned int connections,
         const unsigned int ops,
         const unsigned int data_size,
-        const unsigned short start_port,
         std::vector<std::thread> &workers
 ) {
     const auto ops_per_conn = ops / connections;
@@ -32,14 +32,13 @@ inline void client(
             std::cout << e.what() << std::endl;
         }
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     *start = time_millis();
     for (unsigned int i = 0; i < connections; i++) {
-        workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn, start_port, i]() {
+        workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn, &host_address, i]() {
             try {
                 auto completed_ops = 0;
-                const auto client_fd = setup_server_socket("127.0.0.1", start_port+i);
+                const auto client_fd = setup_server_socket(host_address.host(), host_address.port()+i);
 
                 sockaddr_in cli_addr{};
                 cli_addr.sin_family = AF_INET;
@@ -66,8 +65,8 @@ inline void client(
                             write_buffer[21] = REQUEST_WRITE;
                             //
                             unsigned int key_size;
-                            memcpy(&key_size, write_buffer + 22, sizeof(unsigned int));
-                            char *key =
+                            // memcpy(&key_size, write_buffer + 22, sizeof(unsigned int));
+                            // char *key =
                             // key, value
                         } else {
                             write_buffer[21] = REQUEST_READ;
@@ -82,7 +81,6 @@ inline void client(
                     }
                     if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, 0, client_sockaddr, &addr_len); size > 0) {
                         if (read_buffer[0] == OP_CLIENT_RESPONSE) {
-                            // std::cout << "Got client response" << std::endl;
                             ++completed_ops;
                             // if (completed_ops % 10000 == 0) {
                             //     // std::cout << completed_ops << std::endl;

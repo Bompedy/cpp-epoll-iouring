@@ -29,24 +29,62 @@ int main() {
         pthread_sigmask(SIG_BLOCK, &sigset, nullptr);
 
         std::vector<std::thread> workers;
+        //
+        // std::vector<Address> peers = {
+        //     Address{"127.0.0.1", 6969},
+        //     Address{"127.0.0.1", 6970},
+        //     Address{"127.0.0.1", 6971}
+        // };
 
-        std::vector<Address> peers = {
-            Address{"127.0.0.1", 6969},
-            Address{"127.0.0.1", 6970},
-            Address{"127.0.0.1", 6971}
-        };
+        if (getEnvUInt("IS_CLIENT")) {
+            const auto leader_address = getEnvAddress("LEADER_ADDRESS");
+            const auto host_address = getEnvAddress("HOST_ADDRESS");
+            const auto connections = getEnvUInt("CONNECTIONS");
+            const auto ops = getEnvUInt("OPS");
+            const auto data_size = getEnvUInt("DATA_SIZE");
+            std::cout << "Starting client with configuration:\n"
+                 << "  Leader Address : " << leader_address.host() << ":" << leader_address.port() << "\n"
+                << "  Host Address : " << host_address.host() << ":" << host_address.port() << "\n"
+                 << "  Connections    : " << connections << "\n"
+                 << "  Ops            : " << ops << "\n"
+                 << "  Data Size      : " << data_size << std::endl;
 
-        int buffer_size = 10000;
-        int log_size = 30010;
-        Node node0{ 0, 0, peers, buffer_size, log_size };
-        Node node1{ 1, 0, peers, buffer_size, log_size };
-        Node node2{ 2, 0, peers, buffer_size, log_size };
-        node(node0, workers);
-        node(node1, workers);
-        node(node2, workers);
+            client(host_address, leader_address, connections, ops, data_size, workers);
+        } else {
+            const unsigned char node_id = getEnvUInt("NODE_ID");
+            const unsigned char leader_id = getEnvUInt("LEADER_ID");
+            const auto buffer_size = getEnvUInt("BUFFER_SIZE");
+            const auto log_size = getEnvUInt("LOG_SIZE");
+            const auto peers = getEnvPeers("PEERS");
+            const auto client_listener = getEnvAddress("CLIENT_LISTENER");
+            std::cout << "Starting node with configuration:\n"
+                         << "  Node ID        : " << static_cast<int>(node_id) << "\n"
+                         << "  Leader ID      : " << static_cast<int>(leader_id) << "\n"
+                         << "  Buffer Size    : " << buffer_size << "\n"
+                         << "  Log Size       : " << log_size << "\n"
+                        << "  Client Address : " << client_listener.host() << ":" << client_listener.port() << "\n"
+                         << "  Peers:\n";
 
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        client(Address{"127.0.0.1", 7069}, 1, 30000, 9500, 8000, workers);
+            for (const auto& peer : peers) {
+                std::cout << "    - " << peer.host() << ":" << peer.port() << "\n";
+            }
+            auto node_ptr = std::make_shared<Node>(
+                  node_id, leader_id, client_listener, peers, buffer_size, log_size
+              );
+            node(node_ptr, workers);
+        }
+
+        // int buffer_size = 11000;
+        // int log_size = 150000;
+        // Node node0{ 0, 0, peers, buffer_size, log_size };
+        // Node node1{ 1, 0, peers, buffer_size, log_size };
+        // Node node2{ 2, 0, peers, buffer_size, log_size };
+        // node(node0, workers);
+        // node(node1, workers);
+        // node(node2, workers);
+        //
+        // std::this_thread::sleep_for(std::chrono::seconds(2));
+        // client(Address{"127.0.0.1", 7069}, 2, 100000, 10000, 8000, workers);
 
         int sig;
         while (RUNNING.load()) {
