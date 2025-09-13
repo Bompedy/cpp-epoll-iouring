@@ -49,7 +49,7 @@ inline void client(
                 char read_buffer[data_size + 100];
 
                 if (inet_pton(AF_INET, leader.host().c_str(), &cli_addr.sin_addr) <= 0) {
-                    close(client_fd);
+                    ::close(client_fd);
                     throw std::runtime_error("Invalid address");
                 }
 

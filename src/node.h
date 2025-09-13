@@ -145,7 +145,7 @@ inline void leader_client_listener(const std::shared_ptr<Node>& node) {
         }
 
         delete pool;
-        close(request_fd);
+        ::close(request_fd);
     } catch (std::exception &e) {
         std::cout << e.what() << std::endl;
     }

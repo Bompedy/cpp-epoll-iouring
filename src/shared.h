@@ -6,6 +6,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <mutex>
+#include <unistd.h>
 
 constexpr unsigned char OP_CLIENT_REQUEST = 0;
 constexpr unsigned char OP_CLIENT_RESPONSE = 1;
