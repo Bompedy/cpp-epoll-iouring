@@ -17,34 +17,44 @@ constexpr unsigned char REQUEST_WRITE = 0;
 constexpr unsigned char REQUEST_READ = 1;
 
 class Address {
-    sockaddr_storage storage_{};
-    sockaddr *sock_;
-    std::string host_;
-    unsigned short port_;
+    sockaddr_in addr_{};
 
 public:
-    Address(std::string host, const unsigned short port) : host_(std::move(host)), port_(port) {
-        std::memset(&storage_, 0, sizeof(storage_));
-
-        // Fill in IPv4 sockaddr_in
-        auto *addr_in = reinterpret_cast<sockaddr_in *>(&storage_);
-        addr_in->sin_family = AF_INET;
-        addr_in->sin_port = htons(port_);
-        if (inet_pton(AF_INET, host_.c_str(), &addr_in->sin_addr) <= 0) {
-            throw std::invalid_argument("Invalid IPv4 address: " + host_);
+    Address(const std::string& host, const unsigned short port) {
+        std::memset(&addr_, 0, sizeof(addr_));
+        addr_.sin_family = AF_INET;
+        addr_.sin_port = htons(port);
+        if (inet_pton(AF_INET, host.c_str(), &addr_.sin_addr) <= 0) {
+            throw std::invalid_argument("Invalid IPv4 address: " + host);
         }
-
-        sock_ = reinterpret_cast<sockaddr *>(&storage_);
     }
 
-    [[nodiscard]] const std::string &host() const { return host_; }
-    [[nodiscard]] unsigned short port() const { return port_; }
+    [[nodiscard]] std::string host() const {
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr_.sin_addr, ip_str, INET_ADDRSTRLEN);
+        return std::string{ip_str};
+    }
+
+    [[nodiscard]] unsigned short port() const {
+        return ntohs(addr_.sin_port);
+    }
+
     bool operator==(const Address &other) const {
-        return host_ == other.host_ && port_ == other.port_;
+        return addr_.sin_addr.s_addr == other.addr_.sin_addr.s_addr &&
+               addr_.sin_port == other.addr_.sin_port;
     }
 
-    [[nodiscard]] sockaddr *sockaddr_ptr() const { return sock_; }
-    [[nodiscard]] socklen_t sockaddr_len() const { return sizeof(sockaddr_in); }
+    [[nodiscard]] sockaddr *sockaddr_ptr() {
+        return reinterpret_cast<sockaddr *>(&addr_);
+    }
+
+    [[nodiscard]] const sockaddr *sockaddr_ptr() const {
+        return reinterpret_cast<const sockaddr *>(&addr_);
+    }
+
+    [[nodiscard]] socklen_t sockaddr_len() const {
+        return sizeof(addr_);
+    }
 };
 
 struct BufferPool {
@@ -83,6 +93,7 @@ struct BufferPool {
     }
 };
 
+
 bool tune_socket(
         const int fd,
         const unsigned int buffer_size
@@ -112,6 +123,47 @@ bool tune_socket(
     return true;
 }
 
+inline int setup_server_socket(const std::string &address, const unsigned short port) {
+    constexpr int opt = 1;
+    const auto server_fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (server_fd < 0) {
+        throw std::runtime_error("server socket failed: " + std::string(std::strerror(errno)));
+    }
+    //
+    // if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+    //     close(server_fd);
+    //     throw std::runtime_error("Failed to set reuseport to socket");
+    // }
+
+    const auto flags = fcntl(server_fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl F_GETFL");
+        return false;
+    }
+
+    if (!tune_socket(server_fd, 1024 * 4 * 1024)) {
+        close(server_fd);
+        throw std::runtime_error("Failed to create tune socket");
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, address.c_str(), &addr.sin_addr) <= 0) {
+        close(server_fd);
+        throw std::runtime_error("Invalid address: " + address);
+    }
+
+    if (bind(server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+        close(server_fd);
+        throw std::runtime_error("Failed to bind to port " + std::to_string(port));
+    }
+
+    return server_fd;
+}
+
 long time_millis() {
     auto now = std::chrono::system_clock::now();
     auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -119,3 +171,26 @@ long time_millis() {
     ).count();
     return millis;
 }
+
+// Returns the port number the socket is bound to, or -1 on error
+int get_bound_port(int fd) {
+    struct sockaddr_in sa;
+    socklen_t len = sizeof(sa);
+    if (getsockname(fd, (struct sockaddr*)&sa, &len) == -1) {
+        perror("getsockname failed");
+        return -1;
+    }
+    return ntohs(sa.sin_port);
+}
+
+// Example usage:
+void print_bound_port(int fd) {
+    int port = get_bound_port(fd);
+    if (port != -1) {
+        std::cout << "FD " << fd << " bound to port " << port << std::endl;
+    } else {
+        std::cout << "Failed to get port for FD " << fd << std::endl;
+    }
+}
+
+inline std::atomic RUNNING{true};

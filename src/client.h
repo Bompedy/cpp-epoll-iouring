@@ -4,21 +4,22 @@
 #include <memory>
 #include "shared.h"
 
-void client(
+inline void client(
         const Address &leader,
         const unsigned int connections,
         const unsigned int ops,
         const unsigned int data_size,
-        std::vector<std::thread> &workers,
-        std::atomic<bool> &running
+        const unsigned short start_port,
+        std::vector<std::thread> &workers
 ) {
-    workers.emplace_back([connections, ops, data_size, &leader, &running]() {
-        const auto ops_per_conn = ops / connections;
-        auto completed_connections = std::make_shared<std::atomic<int>>(0);
-        auto send_times = std::make_shared<std::vector<long> >();
-        auto start = std::make_shared<long>(0);
-        std::thread completion_thread([completed_connections, connections, ops, data_size, start]() {
-            while (completed_connections->load() != connections) {
+    const auto ops_per_conn = ops / connections;
+    auto completed_connections = std::make_shared<std::atomic<int>>(0);
+    auto send_times = std::make_shared<std::vector<long> >();
+    auto start = std::make_shared<long>(0);
+    workers.emplace_back([completed_connections, connections, start, ops, data_size]() {
+        try {
+            while (RUNNING.load(std::memory_order_relaxed) && completed_connections->load() != connections) {
+                // std::cout << "Still looping!" << std::endl;
                 std::this_thread::yield();
             }
             auto end = time_millis();
@@ -26,20 +27,19 @@ void client(
             auto mbps = (((float) ops * (float) (data_size * 8)) / 1e6f) / seconds;
             auto ops_per_second = (float) ops / seconds;
             std::cout << "Update - Count(" << ops << ") OPS(" << ops_per_second << ") Seconds(" << seconds <<
-                      ") Throughput(" << mbps << " Mbps)" << std::endl;
-        });
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    ") Throughput(" << mbps << " Mbps)" << std::endl;
+        } catch (std::exception &e) {
+            std::cout << e.what() << std::endl;
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-        std::thread connection_threads[connections];
-        *start = time_millis();
-        for (unsigned int i = 0; i < connections; i++) {
-            connection_threads[i] = std::thread([&leader, completed_connections, data_size, ops_per_conn, &running]() {
-                // std::cout << "Starting thread" << std::endl;
+    *start = time_millis();
+    for (unsigned int i = 0; i < connections; i++) {
+        workers.emplace_back([&leader, completed_connections, data_size, ops_per_conn, start_port, i]() {
+            try {
                 auto completed_ops = 0;
-                const auto client_fd = socket(AF_INET, SOCK_DGRAM, 0);
-                if (!tune_socket(client_fd, 1024 * 4 * 1024)) {
-                    throw std::runtime_error("Failed to create socket");
-                }
+                const auto client_fd = setup_server_socket("127.0.0.1", start_port+i);
 
                 sockaddr_in cli_addr{};
                 cli_addr.sin_family = AF_INET;
@@ -59,10 +59,15 @@ void client(
                 bool should_send = true;
                 bool is_write = true;
 
-                while (running.load(std::memory_order_relaxed)) {
+                while (RUNNING.load(std::memory_order_relaxed)) {
+                    // std::cout << "Still looping 1!" << std::endl;
                     if (should_send) {
                         if (is_write) {
                             write_buffer[21] = REQUEST_WRITE;
+                            //
+                            unsigned int key_size;
+                            memcpy(&key_size, write_buffer + 22, sizeof(unsigned int));
+                            char *key =
                             // key, value
                         } else {
                             write_buffer[21] = REQUEST_READ;
@@ -75,8 +80,7 @@ void client(
                         }
                         should_send = false;
                     }
-                    if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, 0, client_sockaddr, &addr_len);
-                            size > 0) {
+                    if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, 0, client_sockaddr, &addr_len); size > 0) {
                         if (read_buffer[0] == OP_CLIENT_RESPONSE) {
                             // std::cout << "Got client response" << std::endl;
                             ++completed_ops;
@@ -90,15 +94,13 @@ void client(
                             }
                             should_send = true;
                         } else {
-                            throw std::runtime_error("Invalid client response");
+                            throw std::runtime_error("Invalid `client response");
                         }
                     }
                 }
-            });
-        }
-        completion_thread.join();
-        for (unsigned int i = 0; i < connections; i++) {
-            connection_threads[i].join();
-        }
-    });
+            } catch (std::exception &e) {
+                std::cout << e.what() << std::endl;
+            }
+        });
+    }
 }
