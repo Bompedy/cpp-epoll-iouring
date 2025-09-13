@@ -1,8 +1,7 @@
 #include <csignal>
 #include <iostream>
 #include <sstream>
-#include <bits/std_thread.h>
-#include <bits/this_thread_sleep.h>
+#include <thread>
 #include "shared.h"
 #include "node.h"
 #include "client.h"
