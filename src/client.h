@@ -28,7 +28,7 @@ void write_output(const std::string& filename, float mbps, const std::vector<lon
     write_little_endian(file, mbps);
     std::cout << "Total: " << total << std::endl;
     for (size_t i = 0; i < total; ++i) {
-        write_little_endian(file, clientTimes[i]);
+        write_little_endian(file, static_cast<int>(clientTimes[i]));
     }
 
     file.close();
