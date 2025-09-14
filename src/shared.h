@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <mutex>
 #include <unistd.h>
+#include <random>
 
 constexpr unsigned char OP_CLIENT_REQUEST = 0;
 constexpr unsigned char OP_CLIENT_RESPONSE = 1;
@@ -79,7 +80,6 @@ struct BufferPool {
 
     char *acquire() {
         if (free_buffers.empty()) {
-            std::cout << "Allocating" << std::endl;
             return new char[buffer_size];
         }
         char *buf = free_buffers.back();
@@ -197,3 +197,9 @@ void print_bound_port(int fd) {
 }
 
 inline std::atomic RUNNING{true};
+
+inline bool isRead(const double read_ratio) {
+    thread_local std::mt19937 gen(std::random_device{}());
+    thread_local std::uniform_real_distribution<> dis(0.0, 1.0);
+    return dis(gen) < read_ratio;
+}

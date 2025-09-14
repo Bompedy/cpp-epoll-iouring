@@ -5,10 +5,12 @@
 #include "shared.h"
 #include "node.h"
 #include "client.h"
+#include "../../../AppData/Local/JetBrains/CLion2025.1/.docker/2025_1/Docker/iouring-dev_1_0/usr/include/c++/11/random"
 
 unsigned int getEnvUInt(const char *name);
 std::vector<Address> getEnvPeers(const char *env_var_name);
 Address getEnvAddress(const char *env_var_name);
+double getEnvDouble(const char *name);
 
 void shutdown(const int signum) {
     std::cout << "Received signal: " << signum << std::endl;
@@ -41,6 +43,10 @@ int main() {
             const auto connections = getEnvUInt("CONNECTIONS");
             const auto ops = getEnvUInt("OPS");
             const auto data_size = getEnvUInt("DATA_SIZE");
+            const auto read_ratio = getEnvDouble("READ_RATIO");
+            if (read_ratio < 0 || read_ratio > 1) {
+                throw std::invalid_argument("Invalid read ratio must between 0 and 1");
+            }
             std::cout << "Starting client with configuration:\n"
                  << "  Leader Address : " << leader_address.host() << ":" << leader_address.port() << "\n"
                 << "  Host Address : " << host_address.host() << ":" << host_address.port() << "\n"
@@ -48,7 +54,7 @@ int main() {
                  << "  Ops            : " << ops << "\n"
                  << "  Data Size      : " << data_size << std::endl;
 
-            client(host_address, leader_address, connections, ops, data_size, workers);
+            client(host_address, leader_address, connections, ops, data_size, read_ratio, workers);
         } else {
             const unsigned char node_id = getEnvUInt("NODE_ID");
             const unsigned char leader_id = getEnvUInt("LEADER_ID");
@@ -65,25 +71,13 @@ int main() {
                          << "  Peers:\n";
 
             for (const auto& peer : peers) {
-                std::cout << "    - " << peer.host() << ":" << peer.port() << "\n";
+                std::cout << " - " << peer.host() << ":" << peer.port() << "\n";
             }
-            auto node_ptr = std::make_shared<Node>(
+            const auto node_ptr = std::make_shared<Node>(
                   node_id, leader_id, client_listener, peers, buffer_size, log_size
               );
             node(node_ptr, workers);
         }
-
-        // int buffer_size = 11000;
-        // int log_size = 150000;
-        // Node node0{ 0, 0, peers, buffer_size, log_size };
-        // Node node1{ 1, 0, peers, buffer_size, log_size };
-        // Node node2{ 2, 0, peers, buffer_size, log_size };
-        // node(node0, workers);
-        // node(node1, workers);
-        // node(node2, workers);
-        //
-        // std::this_thread::sleep_for(std::chrono::seconds(2));
-        // client(Address{"127.0.0.1", 7069}, 2, 100000, 10000, 8000, workers);
 
         int sig;
         while (RUNNING.load()) {
@@ -103,6 +97,21 @@ int main() {
         std::cout << "Shutting down..." << std::endl;
     } catch (std::exception &e) {
         std::cerr << e.what() << std::endl;
+    }
+}
+
+double getEnvDouble(const char *name) {
+    const char *val = std::getenv(name);
+    if (!val) throw std::runtime_error("Environment variable " + std::string(name) + " is not set");
+
+    try {
+        double parsed = std::stod(val);
+        if (parsed < 0.0) {
+            throw std::invalid_argument(std::string("Negative value not allowed for env var: ") + name);
+        }
+        return parsed;
+    } catch (...) {
+        throw std::invalid_argument(std::string("Invalid double for env var: ") + name);
     }
 }
 
