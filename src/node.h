@@ -76,15 +76,15 @@ inline void leader_commit_upward(const std::shared_ptr<Node>& node, const int se
                 const auto is_write = data[21] == REQUEST_WRITE;
 
                 if (is_write) {
-                    unsigned int key;
-                    std::memcpy(&key, &data[22], sizeof(unsigned int));
+                    // unsigned int key;
+                    // std::memcpy(&key, &data[22], sizeof(unsigned int));
+                    //
+                    // unsigned int value_size;
+                    // std::memcpy(&key, &data[26], sizeof(unsigned int));
 
-                    unsigned int value_size;
-                    std::memcpy(&key, &data[26], sizeof(unsigned int));
+                    // const auto write_buffer = pool->acquire();
 
-                    const auto write_buffer = pool->acquire();
-
-                    storage[key] = write_buffer;
+                    // storage[key] = write_buffer;
 
                     // fill kv
                 }
