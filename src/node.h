@@ -165,7 +165,6 @@ inline void peer_listener(const std::shared_ptr<Node>& node, const int server_fd
             if (const auto size = recvfrom(server_fd, buffer, node->buffer_size, 0, client_sockaddr, &cli_addr_len); size > 0) {
                 switch (const auto op = buffer[0]) {
                     case OP_PROPOSE: {
-                        std::cout << "Got a propose request" << std::endl;
                         int proposed_slot;
                         std::memcpy(&proposed_slot, &buffer[1], sizeof(int));
                         std::memcpy(&ack_buffer[1], &proposed_slot, sizeof(int));
