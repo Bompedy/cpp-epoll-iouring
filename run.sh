@@ -9,7 +9,7 @@ export NODE_ID=0
 export LEADER_ID=0
 export BUFFER_SIZE=11000
 export LOG_SIZE=150000
-export CLIENT_LISTENER="127.0.0.1:7069"
-export PEERS="127.0.0.1:6969,127.0.0.1:6970,127.0.0.1:6971"
+export CLIENT_LISTENER="10.10.1.1:7069"
+export PEERS="10.10.1.1:6969,10.10.1.2:6970,10.10.1.3:6971"
 
 ./build/epolluringtest
