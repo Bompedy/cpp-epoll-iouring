@@ -75,13 +75,16 @@ inline void client(
 
             auto end = time_micro();
 
-            std::sort(times->begin(), times->end());
-            std::sort(write_times->begin(), write_times->end());
-            std::sort(read_times->begin(), read_times->end());
+            unsigned int c = count->load(std::memory_order_relaxed);
+            unsigned int rc = read_count->load(std::memory_order_relaxed);
+            unsigned int wc = write_count->load(std::memory_order_relaxed);
+
+            std::sort(times->begin(), times->begin() + c);
+            std::sort(write_times->begin(), write_times->begin()+wc);
+            std::sort(read_times->begin(), read_times->begin()+rc);
 
             auto seconds = (float) (end - *start) / 1e6f;
             auto mbps = (((float) ops * (float) (data_size * 8)) / 1e6f) / seconds;
-            unsigned int c = count->load(std::memory_order_relaxed);
             if (c > 0) {
                 unsigned int min = 0;
                 unsigned int max = 0;
@@ -95,10 +98,9 @@ inline void client(
                 avg /= c;
 
                 auto all_ops_per_second = (unsigned int) ((float) c / seconds);
-                std::cout << "All - Count(" << c << ") OP/S(" << all_ops_per_second << ") Avg(" << avg << ") Min(" << min << ") Max(" << max << ")" << " Throughput(" << mbps << ")" << std::endl;
+                std::cout << "All - Count(" << c << ") OP/S(" << all_ops_per_second << ") Avg(" << avg << ") Min(" << min << ") Max(" << max << ")" << "Throughput(" << mbps << ")" << std::endl;
             }
 
-            unsigned int rc = read_count->load(std::memory_order_relaxed);
             if (rc > 0) {
                 unsigned int rmin = UINT32_MAX;
                 unsigned int rmax = 0;
@@ -115,7 +117,6 @@ inline void client(
                 std::cout << "Read - Count(" << rc << ") OP/S(" << read_ops_per_second << ") Avg(" << ravg << ") Min(" << rmin << ") Max(" << rmax << ")" << std::endl;
             }
 
-            unsigned int wc = write_count->load(std::memory_order_relaxed);
             if (wc > 0) {
                 unsigned int wmin = UINT32_MAX;
                 unsigned int wmax = 0;
