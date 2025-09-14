@@ -11,4 +11,6 @@ add_executable(epolluringtest
         #        src/temp.cpp
 )
 
+target_link_libraries(epolluringtest pthread)
+
 target_include_directories(epolluringtest PRIVATE ${CMAKE_SOURCE_DIR}/include)
