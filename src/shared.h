@@ -79,6 +79,7 @@ struct BufferPool {
 
     char *acquire() {
         if (free_buffers.empty()) {
+            std::cout << "Allocating" << std::endl;
             return new char[buffer_size];
         }
         char *buf = free_buffers.back();
