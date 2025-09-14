@@ -167,9 +167,9 @@ inline int setup_server_socket(const std::string &address, const unsigned short 
     return server_fd;
 }
 
-long time_millis() {
+long time_micro() {
     auto now = std::chrono::system_clock::now();
-    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+    auto millis = std::chrono::duration_cast<std::chrono::microseconds>(
             now.time_since_epoch()
     ).count();
     return millis;

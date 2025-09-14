@@ -72,68 +72,70 @@ inline void client(
                 // std::cout << "Still looping!" << std::endl;
                 std::this_thread::yield();
             }
-            auto end = time_millis();
-            auto seconds = (float) (end - *start) / 1e3f;
+
+            auto end = time_micro();
+
+            std::sort(times->begin(), times->end());
+            std::sort(write_times->begin(), write_times->end());
+            std::sort(read_times->begin(), read_times->end());
+
+            auto seconds = (float) (end - *start) / 1e6f;
             auto mbps = (((float) ops * (float) (data_size * 8)) / 1e6f) / seconds;
-            auto ops_per_second = (float) ops / seconds;
-            unsigned int min = 0;
-            unsigned int max = 0;
-            unsigned int avg = 0;
             unsigned int c = count->load(std::memory_order_relaxed);
-            for (int i = 0; i < c; ++i) {
-                auto time = (*times)[i];
-                if (time < min) min = time;
-                if (time > max) max = time;
-                avg += time;
+            if (c > 0) {
+                unsigned int min = 0;
+                unsigned int max = 0;
+                unsigned int avg = 0;
+                for (int i = 0; i < c; ++i) {
+                    auto time = (*times)[i];
+                    if (time < min) min = time;
+                    if (time > max) max = time;
+                    avg += time;
+                }
+                avg /= c;
+
+                auto all_ops_per_second = (unsigned int) ((float) c / seconds);
+                std::cout << "All - Count(" << c << ") OP/S(" << all_ops_per_second << ") Avg(" << avg << ") Min(" << min << ") Max(" << max << ")" << " Throughput(" << mbps << ")" << std::endl;
             }
-            avg /= c;
 
-            unsigned int rmin = 0;
-            unsigned int rmax = 0;
-            unsigned int ravg = 0;
-            unsigned int rc = count->load(std::memory_order_relaxed);
-            for (int i = 0; i < rc; ++i) {
-                auto rtime = (*read_times)[i];
-                if (rtime < rmin) rmin = rtime;
-                if (rtime > rmax) rmax = rtime;
-                ravg += rtime;
+            unsigned int rc = read_count->load(std::memory_order_relaxed);
+            if (rc > 0) {
+                unsigned int rmin = UINT32_MAX;
+                unsigned int rmax = 0;
+                unsigned int ravg = 0;
+                for (int i = 0; i < rc; ++i) {
+                    auto rtime = (*read_times)[i];
+                    if (rtime < rmin) rmin = rtime;
+                    if (rtime > rmax) rmax = rtime;
+                    ravg += rtime;
+                }
+                ravg /= rc;
+
+                auto read_ops_per_second = (unsigned int) ((float) rc / seconds);
+                std::cout << "Read - Count(" << rc << ") OP/S(" << read_ops_per_second << ") Avg(" << ravg << ") Min(" << rmin << ") Max(" << rmax << ")" << std::endl;
             }
-            ravg /= rc;
 
-            unsigned int wmin = 0;
-            unsigned int wmax = 0;
-            unsigned int wavg = 0;
-            unsigned int wc = count->load(std::memory_order_relaxed);
-            for (int i = 0; i < wc; ++i) {
-                auto wtime = (*write_times)[i];
-                if (wtime < wmin) wmin = wtime;
-                if (wtime > wmax) wmax = wtime;
-                wavg += wtime;
+            unsigned int wc = write_count->load(std::memory_order_relaxed);
+            if (wc > 0) {
+                unsigned int wmin = UINT32_MAX;
+                unsigned int wmax = 0;
+                unsigned int wavg = 0;
+                for (int i = 0; i < wc; ++i) {
+                    auto wtime = (*write_times)[i];
+                    if (wtime < wmin) wmin = wtime;
+                    if (wtime > wmax) wmax = wtime;
+                    wavg += wtime;
+                }
+                wavg /= wc;
+                auto write_ops_per_second = (unsigned int) ((float) wc / seconds);
+                std::cout << "Write - Count(" << wc << ") OP/S(" << write_ops_per_second << ") Avg(" << wavg << ") Min(" << wmin << ") Max(" << wmax << ")" << std::endl;
             }
-            wavg /= wc;
-
-            std::cout << "All - Count(" << std::endl;
-
-
-            /*
-                All - Count(100000) OPS(31416) Avg(300) Min(96) Max(3814) 50th(283) 90th(444) 95th(503) 99th(620) 99.9th(893) 99.99th(2245)
-                Update - Count(49891) OPS(15674) Avg(353) Min(161) Max(3814) 50th(333) 90th(488) 95th(543) 99th(656) 99.9th(961) 99.99th(3688)
-                Read - Count(50109) OPS(15742) Avg(246) Min(96) Max(1161) 50th(226) 90th(367) 95th(426) 99th(541) 99.9th(819) 99.99th(1083)
-             */
-
-
-
-
-            std::cout << "Update - Count(" << ops << ") OPS(" << ops_per_second << ") Seconds(" << seconds <<
-                    ") Throughput(" << mbps << " Mbps)" << std::endl;
-            std::cout << "Total reads: " << read_count->load() << std::endl;
-            std::cout << "Total writes: " << write_count->load() << std::endl;
         } catch (std::exception &e) {
             std::cout << e.what() << std::endl;
         }
     });
 
-    *start = time_millis();
+    *start = time_micro();
     for (unsigned int i = 0; i < connections; i++) {
         workers.emplace_back([
             &leader,
@@ -178,7 +180,7 @@ inline void client(
                 while (RUNNING.load(std::memory_order_relaxed)) {
                     if (should_send) {
                         const unsigned int current_op = i*ops_per_conn+completed_ops;
-                        send_time = time_millis();
+                        send_time = time_micro();
 
                         const ClientEntry& key_entry = (*keys)[current_op];
                         was_write = false;
@@ -214,7 +216,7 @@ inline void client(
                     }
                     if (const auto size = recvfrom(client_fd, read_buffer, data_size + 100, 0, client_sockaddr, &addr_len); size > 0) {
                         if (read_buffer[0] == OP_CLIENT_RESPONSE) {
-                            long recv_time = time_millis();
+                            long recv_time = time_micro();
                             if (was_write) {
                                 unsigned int index = write_count->fetch_add(1);
                                 (*write_times)[index] = (recv_time - send_time);
