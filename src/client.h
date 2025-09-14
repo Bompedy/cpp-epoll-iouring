@@ -86,7 +86,7 @@ inline void client(
             auto seconds = (float) (end - *start) / 1e6f;
             auto mbps = (((float) ops * (float) (data_size * 8)) / 1e6f) / seconds;
             if (c > 0) {
-                unsigned int min = 0;
+                unsigned int min = UINT32_MAX;
                 unsigned int max = 0;
                 unsigned int avg = 0;
                 for (int i = 0; i < c; ++i) {
@@ -98,7 +98,7 @@ inline void client(
                 avg /= c;
 
                 auto all_ops_per_second = (unsigned int) ((float) c / seconds);
-                std::cout << "All - Count(" << c << ") OP/S(" << all_ops_per_second << ") Avg(" << avg << ") Min(" << min << ") Max(" << max << ")" << "Throughput(" << mbps << ")" << std::endl;
+                std::cout << "All - Count(" << c << ") OP/S(" << all_ops_per_second << ") Avg(" << avg << ") Min(" << min << ") Max(" << max << ")" << " Throughput(" << mbps << ")" << std::endl;
             }
 
             if (rc > 0) {
