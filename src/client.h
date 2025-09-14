@@ -3,11 +3,35 @@
 #include <vector>
 #include <memory>
 #include "shared.h"
+#include <fstream>
+#include <filesystem>
 
 struct ClientEntry {
     char* data;
     size_t size;
 };
+
+template <typename T>
+void write_little_endian(std::ofstream& stream, T value) {
+    static_assert(std::is_arithmetic<T>::value, "Only arithmetic types supported");
+
+    T temp = value;
+    stream.write(reinterpret_cast<const char*>(&temp), sizeof(T));
+
+    if (!stream) throw std::runtime_error("Failed to write to file");
+}
+
+void write_output(const std::string& filename, float mbps, const std::vector<long>& clientTimes, const size_t total) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) throw std::runtime_error("Failed to open file for writing");
+
+    write_little_endian(file, mbps);
+    for (size_t i = 0; i < total && i < clientTimes.size(); ++i) {
+        write_little_endian(file, clientTimes[i]);
+    }
+
+    file.close();
+}
 
 inline void client(
         const Address &host_address,
@@ -65,8 +89,6 @@ inline void client(
         read_times,
         write_times
     ] {
-
-
         try {
             while (RUNNING.load(std::memory_order_relaxed) && completed_connections->load() != connections) {
                 // std::cout << "Still looping!" << std::endl;
@@ -99,6 +121,12 @@ inline void client(
 
                 auto all_ops_per_second = (unsigned int) ((float) c / seconds);
                 std::cout << "All - Count(" << c << ") OP/S(" << all_ops_per_second << ") Avg(" << avg << ") Min(" << min << ") Max(" << max << ")" << " Throughput(" << mbps << ")" << std::endl;
+
+                try {
+                    write_output("output.bin", mbps, *times, c);
+                } catch (const std::exception &e) {
+                    std::cerr << "Write failed: " << e.what() << std::endl;
+                }
             }
 
             if (rc > 0) {
